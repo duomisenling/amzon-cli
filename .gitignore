@@ -1,0 +1,26 @@
+# 本机 Agent 配置（只忽略仓库根目录；保留 amz-cli/.claude/skills）
+/.agents/
+/.claude/
+/.codex/
+
+# 仅作开发参考的第三方仓库和 API 资料
+/lark-cli/
+/ads-api-docs/
+
+# 所有项目的真实环境变量与私钥
+**/.env
+**/.env.*
+!**/.env.example
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx
+
+# 依赖、构建产物和运行时文件
+**/node_modules/
+**/dist/
+**/coverage/
+**/*.log
+**/*.tmp
+**/*.bak
+

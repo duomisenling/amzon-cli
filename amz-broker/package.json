@@ -1,0 +1,13 @@
+{
+  "name": "amz-broker",
+  "version": "0.1.0",
+  "description": "Token Broker for amz-cli — 集中保管亚马逊长期凭证,只发 1 小时短期令牌",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "node server.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Amazon CLI Operator"
+  short_description: "面向人类与 Agent 的安全亚马逊店铺运营命令行技能包"
+  default_prompt: "使用 $amz-cli 安全处理亚马逊店铺运营请求；不确定参数时先运行 --help。"

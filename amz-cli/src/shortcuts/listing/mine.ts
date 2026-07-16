@@ -1,0 +1,140 @@
+// listing mine —— 列出自己店铺的 listing(带状态/问题过滤)
+// listing sku  —— 查自己店铺单个 SKU 的完整 listing 详情
+//
+// API: Listings Items API 2021-08-01(2026-07-13 从官方 OpenAPI 规范核实)
+//   GET /listings/2021-08-01/items/{sellerId}            searchListingsItems
+//   GET /listings/2021-08-01/items/{sellerId}/{sku}      getListingsItem
+//   includedData 枚举:summaries/attributes/issues/offers/fulfillmentAvailability/
+//                     procurement/relationships/productTypes;pageSize 最大 20
+// 角色:Product Listing
+//
+// sellerId 来源:--seller-id flag,或 .env 里的 SELLER_ID。
+// (提示:可用 pricing foep 响应里的 offerIdentifier.sellerId,或 Seller Central 查看)
+
+import { AmzError } from '../../internal/errs/errors.js';
+import type { ToolDefinition } from '../../tools/types.js';
+import { resolveMarketplace, strFlag, validateNumberFlag } from '../common.js';
+
+export function resolveSellerId(flags: Record<string, unknown>, region?: string): string {
+  // sellerId 按区域可能不同(实测:NA 与 EU 是两个不同的编号),
+  // 优先级:--seller-id flag > SELLER_ID_<区域> > SELLER_ID(默认)
+  const fromFlag = strFlag(flags, 'sellerId');
+  const regionEnv = region ? process.env[`SELLER_ID_${region.toUpperCase()}`]?.trim() : undefined;
+  const fromEnv = process.env['SELLER_ID']?.trim();
+  const sellerId = fromFlag ?? (regionEnv || undefined) ?? (fromEnv || undefined);
+  if (!sellerId) {
+    throw new AmzError({
+      type: 'invalid_param',
+      subtype: 'missing_seller_id',
+      param: '--seller-id',
+      hintAgent: 'fix_param',
+      hintHuman:
+        '缺少卖家编号:请用 --seller-id 传入,或在 .env 里配置 SELLER_ID(多区域用 SELLER_ID_NA / SELLER_ID_EU)。' +
+        '(查看方式:Seller Central → 设置 → 账户信息 → 商户令牌 Merchant Token)',
+      message: 'sellerId is required (flag --seller-id or env SELLER_ID / SELLER_ID_<REGION>)',
+    });
+  }
+  return sellerId;
+}
+
+const SELLER_ID_FLAG = {
+  name: 'seller-id',
+  desc: '卖家编号(可省略,默认读 .env 的 SELLER_ID)',
+};
+
+export const listingMine: ToolDefinition = {
+  service: 'listing',
+  command: 'mine',
+  description: '列出自己店铺的 listing(可按状态/问题严重度过滤;这是私有数据,仅本店铺)',
+  mutation: 'none',
+  roles: ['Product Listing'],
+  flags: [
+    { name: 'marketplace', desc: '市场,国家码如 US / CA / MX(必填)', required: true },
+    SELLER_ID_FLAG,
+    { name: 'skus', desc: '按 SKU 精确查,逗号分隔,最多 20 个(可选)' },
+    {
+      name: 'with-issue-severity',
+      desc: '只看有问题的 listing,按严重度过滤(可选值:ERROR | WARNING)',
+      enum: ['ERROR', 'WARNING'],
+    },
+    { name: 'page-size', desc: '每页数量,1-20,默认 10' },
+    { name: 'page-token', desc: '分页游标' },
+  ],
+  validate: (flags) => {
+    validateNumberFlag(flags, 'pageSize', '--page-size', { min: 1, max: 20, integer: true });
+    const skus = strFlag(flags, 'skus')?.split(',').map((s) => s.trim()).filter(Boolean);
+    if (skus && (skus.length < 1 || skus.length > 20)) {
+      throw new AmzError({
+        type: 'invalid_param', subtype: 'invalid_sku_count', param: '--skus', hintAgent: 'fix_param',
+        hintHuman: '--skus 一次必须提供 1 到 20 个 SKU。', message: `--skus count must be 1-20, got ${skus.length}`,
+      });
+    }
+  },
+  execute: async (ctx) => {
+    const mkt = resolveMarketplace(ctx.flags['marketplace']);
+    const sellerId = resolveSellerId(ctx.flags, mkt.region);
+    const skus = strFlag(ctx.flags, 'skus');
+
+    ctx.progress(`· 正在列出本店铺在 ${mkt.country} 的 listing...`);
+
+    const resp = (await ctx.client.get(
+      `/listings/2021-08-01/items/${encodeURIComponent(sellerId)}`,
+      {
+        marketplaceIds: mkt.id,
+        includedData: 'summaries,issues',
+        ...(skus ? { identifiers: skus, identifiersType: 'SKU' } : {}),
+        ...(strFlag(ctx.flags, 'withIssueSeverity')
+          ? { withIssueSeverity: strFlag(ctx.flags, 'withIssueSeverity') }
+          : {}),
+        ...(strFlag(ctx.flags, 'pageSize') ? { pageSize: Number(strFlag(ctx.flags, 'pageSize')) } : {}),
+        ...(strFlag(ctx.flags, 'pageToken') ? { pageToken: strFlag(ctx.flags, 'pageToken') } : {}),
+      },
+      mkt.region,
+    )) as {
+      numberOfResults?: number;
+      pagination?: { nextToken?: string };
+      items?: Array<Record<string, unknown>>;
+    };
+
+    return {
+      marketplace: mkt.country,
+      numberOfResults: resp.numberOfResults ?? 0,
+      items: resp.items ?? [],
+      ...(resp.pagination?.nextToken ? { nextToken: resp.pagination.nextToken } : {}),
+    };
+  },
+};
+
+export const listingSku: ToolDefinition = {
+  service: 'listing',
+  command: 'sku',
+  description: '查自己店铺单个 SKU 的完整 listing 详情(属性/问题/报价/库存)',
+  mutation: 'none',
+  roles: ['Product Listing'],
+  flags: [
+    { name: 'marketplace', desc: '市场,国家码如 US / CA / MX(必填)', required: true },
+    { name: 'sku', desc: '本店铺的 SKU(必填)', required: true },
+    SELLER_ID_FLAG,
+    {
+      name: 'include',
+      desc: '返回的数据集,默认 summaries,issues,offers,fulfillmentAvailability。可加 attributes/relationships/productTypes',
+    },
+  ],
+  execute: async (ctx) => {
+    const mkt = resolveMarketplace(ctx.flags['marketplace']);
+    const sellerId = resolveSellerId(ctx.flags, mkt.region);
+    const sku = strFlag(ctx.flags, 'sku')!;
+    const include =
+      strFlag(ctx.flags, 'include') ?? 'summaries,issues,offers,fulfillmentAvailability';
+
+    ctx.progress(`· 正在查询 SKU "${sku}"(${mkt.country})...`);
+
+    const item = (await ctx.client.get(
+      `/listings/2021-08-01/items/${encodeURIComponent(sellerId)}/${encodeURIComponent(sku)}`,
+      { marketplaceIds: mkt.id, includedData: include },
+      mkt.region,
+    )) as Record<string, unknown>;
+
+    return { marketplace: mkt.country, item };
+  },
+};

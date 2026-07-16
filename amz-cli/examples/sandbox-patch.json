@@ -1,0 +1,3 @@
+[
+  { "op": "replace", "path": "/attributes/purchasable_offer", "value": [] }
+]

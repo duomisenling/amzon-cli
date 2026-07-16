@@ -1,0 +1,9 @@
+# 凭证文件——绝不提交
+.env
+.env.*
+!.env.example
+
+# 依赖与产物
+node_modules/
+dist/
+*.log

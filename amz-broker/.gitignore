@@ -1,0 +1,15 @@
+# 凭证与部署环境变量——绝不提交
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+
+# 依赖、日志与临时文件
+node_modules/
+*.log
+*.tmp
+*.bak
+
