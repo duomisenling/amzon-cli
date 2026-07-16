@@ -11,7 +11,7 @@ import { AmzError } from '../../internal/errs/errors.js';
 import type { ToolDefinition } from '../../tools/types.js';
 import { resolveMarketplace, strFlag } from '../common.js';
 
-const INCLUDED_DATA = [
+export const CATALOG_INCLUDED_DATA = [
   'attributes',
   'classifications',
   'dimensions',
@@ -23,6 +23,23 @@ const INCLUDED_DATA = [
   'summaries',
   'vendorDetails',
 ];
+
+export function validateCatalogIncludedData(flags: Record<string, unknown>): void {
+  const include = strFlag(flags, 'include');
+  if (!include) return;
+  for (const set of include.split(',').map((s) => s.trim())) {
+    if (!CATALOG_INCLUDED_DATA.includes(set)) {
+      throw new AmzError({
+        type: 'invalid_param',
+        subtype: 'invalid_included_data',
+        param: '--include',
+        hintAgent: 'fix_param',
+        hintHuman: `--include 里的 "${set}" 无效。可选:${CATALOG_INCLUDED_DATA.join(' / ')}`,
+        message: `invalid includedData value: ${set}`,
+      });
+    }
+  }
+}
 
 interface CatalogItem {
   asin?: string;
@@ -60,7 +77,7 @@ export const listingSearch: ToolDefinition = {
     { name: 'brand', desc: '按品牌过滤(仅关键词搜索时有效)' },
     {
       name: 'include',
-      desc: `额外返回的数据集,逗号分隔(默认 summaries)。可选:${INCLUDED_DATA.join(',')}`,
+      desc: `额外返回的数据集,逗号分隔(默认 summaries)。可选:${CATALOG_INCLUDED_DATA.join(',')}`,
     },
     { name: 'page-size', desc: '每页数量,1-20,默认 10' },
     { name: 'page-token', desc: '分页游标(上一页返回的 nextToken)' },
@@ -111,21 +128,7 @@ export const listingSearch: ToolDefinition = {
         });
       }
     }
-    const include = strFlag(flags, 'include');
-    if (include) {
-      for (const set of include.split(',').map((s) => s.trim())) {
-        if (!INCLUDED_DATA.includes(set)) {
-          throw new AmzError({
-            type: 'invalid_param',
-            subtype: 'invalid_included_data',
-            param: '--include',
-            hintAgent: 'fix_param',
-            hintHuman: `--include 里的 "${set}" 无效。可选:${INCLUDED_DATA.join(' / ')}`,
-            message: `invalid includedData value: ${set}`,
-          });
-        }
-      }
-    }
+    validateCatalogIncludedData(flags);
   },
   execute: async (ctx) => {
     const mkt = resolveMarketplace(ctx.flags['marketplace']);

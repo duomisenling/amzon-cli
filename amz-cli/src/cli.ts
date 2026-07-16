@@ -32,6 +32,7 @@ import { feedSubmit, feedStatus, feedResult } from './shortcuts/feed/commands.js
 import { adsProfiles, adsCampaigns } from './shortcuts/ads/commands.js';
 import { adsReportRun, adsReportStatus } from './shortcuts/ads/report.js';
 import { adsCampaignCreate } from './shortcuts/ads/campaign-create.js';
+import { adsKeywordCampaignLaunch } from './shortcuts/ads/keyword-campaign-launch.js';
 import { adsCampaignState } from './shortcuts/ads/campaign-state.js';
 import { adsCampaignBudget } from './shortcuts/ads/campaign-budget.js';
 import { adsKeywords, adsKeywordBid, adsNegativeKeyword } from './shortcuts/ads/keywords.js';
@@ -100,6 +101,7 @@ async function main(): Promise<void> {
     adsReportStatus,
     // —— 广告写操作(dry-run/confirm 门槛;首次验证走测试账户=广告沙盒)——
     adsCampaignCreate,
+    adsKeywordCampaignLaunch,
     adsCampaignState,
     adsCampaignBudget,
     adsKeywords,

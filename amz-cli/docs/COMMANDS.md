@@ -3,7 +3,8 @@
 给运营同事和 AI Agent 看的完整命令说明。所有命令的输出都是 JSON(stdout),进度和错误在另一个通道(stderr),Agent 和自动化脚本可以放心解析。
 
 > 开发阶段运行方式:`npx tsx src/cli.ts <命令>`(在项目目录下)。
-> 正式发布后:`amz-cli <命令>`。下文示例统一用 `amz-cli` 开头。
+> Cherry Studio 与正式使用统一运行编译版:`node dist/cli.js <命令>`。下文为简洁统一用 `amz-cli` 代称。
+> 首次安装与更新见 [Cherry Studio 安装指南](CHERRY_STUDIO_INSTALL.md)。
 
 ---
 
@@ -66,8 +67,22 @@ amz-cli sales stats --account shop-b --marketplace US --days 7
 **数据边界**:
 - 公开数据(商品目录、Buy Box 报价)任何商品都能查,包括竞品;
 - 私有数据(订单、库存、listing)只能查自己店铺的;
-- 买家的姓名/地址/邮箱在任何输出里都不会出现(合规要求,程序层面剥离);
+- 订单输出使用字段白名单剥离姓名、地址和邮箱；反馈报告会删除 Amazon 原始报告里的 `Rater Email`；
+- 通用 `report run/download` 支持 Amazon 的多种报告类型，Agent 不得主动请求受限 PII 报告，也不要把含敏感数据的报告保存到共享目录；
 - BSR 是排名不是销量;任何卖家的销量数字都查不到。
+
+**运营可以直接说人话**，Agent 应先判断意图，而不是看到“报告”就固定调用 `report run`：
+
+| 运营说法 | Agent 应如何处理 |
+|---|---|
+| “B0XXX 最近 30 天卖了多少” | 直接用 `sales stats --asin` 查询 |
+| “最近 7 天全店卖得怎么样” | 直接用全店 `sales stats` 查询 |
+| “看看这个产品卖得怎么样”但没有商品编号 | 追问 ASIN/SKU；可说明默认查最近 30 天 |
+| “做个销售报告” | 追问是单品、全店汇总还是导出全店明细文件 |
+| “导出 US 站全店商品明细” | 使用 `report run` 生成文件 |
+| “查这个 ASIN 的差评” | 说明卖家反馈是全店维度、不能按 ASIN 查商品评价，再确认是否查全店反馈 |
+
+判断原则：上下文和必要参数明确时直接查，不要反复确认；不同理解会改变对象、范围、耗时、文件输出或费用时才追问。写操作缺少预算、商品、站点、匹配方式等业务决定时必须追问。
 
 **沙盒模式**:仅本地凭证模式可在 `.env` 里设 `SP_API_SANDBOX=true`，所有 SP-API 调用走亚马逊沙盒。Broker 协议暂不支持沙盒；同时设置 `BROKER_URL` 和 `SP_API_SANDBOX=true` 时 CLI 会安全拒绝，绝不会回退到生产端点。
 
@@ -75,7 +90,7 @@ amz-cli sales stats --account shop-b --marketplace US --days 7
 
 - Broker/LWA 换令牌最长等 30 秒，普通 SP-API/Ads API 请求最长等 60 秒，Feed 上传和报告下载最长等 120 秒；达到时限只停止本次客户端请求，不代表 Amazon 一定没有收到请求。
 - 429 限流和安全的只读 GET/HEAD 遇到临时故障可以自动退避重试。
-- POST/PUT 写请求遇到 5xx 不自动重放。此时结果可能已经生效，必须先用只读命令或 Seller Central/广告后台核对，确认未生效后再决定是否重新执行。
+- POST/PUT/PATCH 写请求遇到 5xx、网络断开、超时或无法解析的成功响应时不自动重放，也不会向 Agent 标记为可重试。此时结果可能已经生效，必须先用只读命令或 Seller Central/广告后台核对。
 
 ---
 
@@ -111,6 +126,7 @@ amz-cli sales stats --account shop-b --marketplace US --days 7
 | ads | `keywords` | 投放的关键词列表 | 读 |
 | ads | `report-run / report-status` | 广告报表(5 种预设) | 读 |
 | ads | `campaign-create` | 创建广告活动 | 🔒 写 |
+| ads | `keyword-campaign-launch` | 按固定方案创建完整手动关键词广告 | 🔒 写 |
 | ads | `campaign-state` | 启用/暂停广告活动 | 🔒 写 |
 | ads | `campaign-budget` | 调整日预算 | 🔒 写 |
 | ads | `keyword-bid` | 调整关键词竞价 | 🔒 写 |
@@ -330,6 +346,8 @@ amz-cli report run --type GET_MERCHANT_LISTINGS_ALL_DATA --marketplace US --out 
 
 发起 → 每 15 秒查一次进度 → 生成后自动下载解析。`--timeout` 单位为分钟，默认 10，只接受 1–60 的有限数字；`NaN`、`Infinity`、0 和超过 60 的值会在发出 API 请求前被拒绝。达到等待时限只停止本次轮询，不会取消 Amazon 服务端的报告；保留 `reportId`，稍后用 `report status` / `report download` 继续处理。
 
+`report run` 适合全量导出或明细文件，不是单品销售查询的默认入口。要查一个 ASIN/SKU 的销量、订单数和销售额，优先使用 `sales stats --asin/--sku`；当前通用报告命令没有 `--asin` 参数。
+
 ### report types / create / status / download — 分步操作
 
 ```powershell
@@ -345,6 +363,7 @@ amz-cli report download --report-id <编号>             # DONE 后下载
 - FBA 库存类报告(`GET_FBA_MYI_*`)必须有开始时间——CLI 会自动补 24 小时前,不用你操心;
 - **同类型报告短时间内重复请求会被亚马逊拒绝(FATAL)**,等几小时再试;
 - 报告显示 CANCELLED 通常表示"该时间段没有数据",不一定是故障。
+- `GET_SELLER_FEEDBACK_DATA` 的买家邮箱列会在 CLI 层删除；若返回格式无法安全识别，CLI 会拒绝输出或保存原文。
 
 ---
 
@@ -354,7 +373,7 @@ amz-cli report download --report-id <编号>             # DONE 后下载
 amz-cli feedback run --marketplace US --days 90
 ```
 
-返回最近 N 天的**1-3 星差评和中评**。拿不到 4-5 星好评——这是亚马逊 API 的限制。没有差评时报告会是 CANCELLED(好事)。
+返回最近 N 天的**1-3 星差评和中评**。拿不到 4-5 星好评——这是亚马逊 API 的限制。Amazon 原始报告中的 `Rater Email` 会在 CLI 层删除。没有差评时报告会是 CANCELLED(好事)。
 
 ---
 
@@ -410,6 +429,9 @@ amz-cli feed result --feed-id <编号>    # 看哪些行成功/失败及原因
 amz-cli ads profiles                                       # 广告账户列表,拿 profileId(第一步)
 amz-cli ads campaigns --profile-id <ID> --state ENABLED    # 正在投放的广告活动
 amz-cli ads keywords --profile-id <ID> --campaign-id <ID>  # 某活动投的词(含竞价)
+# 返回 nextToken 时继续翻页，其他过滤参数保持不变
+amz-cli ads campaigns --profile-id <ID> --state ENABLED --next-token <nextToken>
+amz-cli ads keywords --profile-id <ID> --campaign-id <ID> --next-token <nextToken>
 ```
 
 ### 读:广告报表(5 种预设)
@@ -430,10 +452,18 @@ amz-cli ads report-run --profile-id <ID> --type <预设> --start 2026-07-01 --en
 
 ### 写 🔒:建广告 / 启停 / 调预算 / 调竞价 / 否定词
 
+`campaign-create` 只创建 Campaign 外壳；完整手动关键词广告使用 `keyword-campaign-launch`。后者会创建 Campaign、Ad Group、Product Ad 和正向 Keyword，并在完整回读成功后按方案决定是否启用。
+
 ```powershell
 # 建广告活动(默认创建为暂停状态,不花钱;启用必须另走 campaign-state 的独立预览)
 amz-cli ads campaign-create --profile-id <ID> --name "活动名" --targeting-type AUTO --daily-budget 10 --start 2026-08-01 --dry-run
 amz-cli ads campaign-create ... --confirm --preview-token <preview_token>
+
+# 用固定 JSON 方案创建完整手动关键词广告
+Copy-Item examples\keyword-campaign-plan.example.json .\my-keyword-campaign.json
+# 编辑方案并逐项核对 profileId/region/ASIN或SKU/预算/关键词/匹配方式/竞价/enableAfterCreate
+amz-cli ads keyword-campaign-launch --plan .\my-keyword-campaign.json --dry-run
+amz-cli ads keyword-campaign-launch --plan .\my-keyword-campaign.json --confirm --preview-token <preview_token>
 
 # 暂停/启用某个广告活动
 amz-cli ads campaign-state --profile-id <ID> --campaign-id <ID> --state PAUSED --dry-run
@@ -454,6 +484,10 @@ amz-cli ads negative-keyword ... --confirm --preview-token <preview_token>
 
 典型广告优化循环:`report-run --type search-terms` 找废词 → `negative-keyword` 否掉 / `keyword-bid` 降竞价 / `campaign-budget` 给表现好的加预算。
 
+完整关键词广告方案格式见 `examples/keyword-campaign-plan.example.json`。`launchId` 必须是本次发布的唯一编号；方案要求 1–1000 个关键词，同一关键词文本与匹配方式不能重复。`product` 中 `asin` 和 `sku` 必须二选一。`enableAfterCreate=true` 并不表示一创建 Campaign 就花钱：执行顺序固定为 PAUSED Campaign → 广告组 → 商品广告 → 分批创建关键词 → 回读核对 ID/归属/数量 → 最后启用。
+
+Amazon Ads 批量创建可能返回 `207 Multi-Status`。CLI 会逐项读取 `success/error`：部分失败时保留已成功 ID、Campaign 保持暂停；同一方案再次确认后只补缺项。写请求网络超时或结果不明确时不会自动重放，而是要求先到后台或用只读命令核对。
+
 ### 广告沙盒:测试账户
 
 ```powershell
@@ -470,7 +504,7 @@ amz-cli ads test-account-status
 
 > ⚠️ **写操作只能用编译版执行**:先 `npm run build`,再用 `node dist/cli.js ...`。
 > 开发用的 `npx tsx src/cli.ts` 会吞掉终端确认输入、让门槛失效,所以 CLI **主动禁止**在这种模式下执行写操作(会报 `dev_mode_write_forbidden`)。
-> 同事使用的正式版(`npm install -g` 装的)本来就是编译版,天然安全,这条只影响开发者本机测试。
+> 同事按安装指南使用 `node dist/cli.js` 运行编译版；这条只影响开发者本机直接运行源码。
 
 所有 🔒 写操作遵循同一个铁律,**任何一步都不能跳过**:
 
@@ -483,9 +517,9 @@ amz-cli ads test-account-status
          → 不可撤销操作(feed submit):输入屏幕上的随机 6 位确认码
 ```
 
-`preview_token` 只能使用一次，并绑定预览时的命令、全部业务参数、Feed/patch 文件内容哈希，以及当前 `BROKER_URL`、店铺、Seller ID、SP/Ads 区域、Client ID 和凭证哈希。敏感凭证明文不会写入令牌记录。缺少令牌、令牌过期、已经使用、确认命令改变业务参数、输入文件变化或运行环境切换，CLI 都会拒绝执行并要求重新预览。
+`preview_token` 只能使用一次，并绑定预览时的命令、全部业务参数、Feed/patch 文件内容哈希，以及当前 `BROKER_URL`、店铺、SP/Ads 区域、Client ID、凭证哈希；Listing 写操作还会绑定 Broker 实际返回的 Seller ID。敏感凭证明文不会写入令牌记录。缺少令牌、令牌过期、已经使用、确认命令改变业务参数、输入文件变化、运行环境或远端 Seller ID 映射切换，CLI 都会拒绝执行并要求重新预览。
 
-**普通非交互 Agent、n8n、管道带 `--confirm` 会被 CLI 拒绝**。Agent 的正确做法是运行 dry-run，把预览和带令牌的最终命令交给人。
+**普通非交互 Agent、n8n、管道带 `--confirm` 会被 CLI 拒绝**。Agent 的正确做法是运行 dry-run，把预览和带令牌的最终命令交给人。完整关键词广告若使用项目自带 MCP，可由 Cherry 的逐次工具审批替代 PowerShell TTY，但必须先调用 `prepare_keyword_campaign`，且不得自动批准 `launch_keyword_campaign` 或启用 `bypassPermissions`。
 
 安全边界说明：TTY、确认码和本地 preview token 主要防误操作，不能证明终端背后一定是真人，也不能阻止同权限恶意程序伪造本地状态或直接使用 Amazon bearer token。生产环境若要求“Agent 技术上绝不能写”，必须使用独立只读 Amazon 凭证，或由隔离的审批代理持有写凭证并代理写请求。
 

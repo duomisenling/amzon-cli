@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "launchId": "replace-with-unique-launch-id",
+  "profileId": "123456789012345",
+  "region": "na",
+  "campaign": {
+    "name": "B012345678 manual keywords",
+    "dailyBudget": 20,
+    "startDate": "2030-01-01",
+    "biddingStrategy": "LEGACY_FOR_SALES"
+  },
+  "adGroup": {
+    "name": "Core keywords",
+    "defaultBid": 0.8
+  },
+  "product": {
+    "asin": "B012345678"
+  },
+  "keywords": [
+    {
+      "text": "example exact keyword",
+      "matchType": "EXACT",
+      "bid": 0.75
+    },
+    {
+      "text": "example phrase keyword",
+      "matchType": "PHRASE",
+      "bid": 0.65
+    }
+  ],
+  "enableAfterCreate": true
+}

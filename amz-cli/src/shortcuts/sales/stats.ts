@@ -10,7 +10,7 @@
 
 import { AmzError } from '../../internal/errs/errors.js';
 import type { ToolDefinition } from '../../tools/types.js';
-import { daysAgoIso, resolveMarketplace, strFlag, validateNumberFlag } from '../common.js';
+import { daysAgoIso, resolveMarketplace, strFlag, validateIsoTimeRange, validateNumberFlag } from '../common.js';
 
 const GRANULARITIES = ['Hour', 'Day', 'Week', 'Month', 'Year', 'Total'];
 
@@ -56,26 +56,7 @@ export const salesStats: ToolDefinition = {
       });
     }
     validateNumberFlag(flags, 'days', '--days', { min: 1, max: 365, integer: true });
-    const start = strFlag(flags, 'start');
-    const end = strFlag(flags, 'end');
-    if (start && !Number.isFinite(Date.parse(start))) {
-      throw new AmzError({
-        type: 'invalid_param', subtype: 'invalid_start_time', param: '--start', hintAgent: 'fix_param',
-        hintHuman: '--start 必须是合法的 ISO 8601 时间。', message: `invalid --start: ${start}`,
-      });
-    }
-    if (end && !Number.isFinite(Date.parse(end))) {
-      throw new AmzError({
-        type: 'invalid_param', subtype: 'invalid_end_time', param: '--end', hintAgent: 'fix_param',
-        hintHuman: '--end 必须是合法的 ISO 8601 时间。', message: `invalid --end: ${end}`,
-      });
-    }
-    if (start && end && Date.parse(start) >= Date.parse(end)) {
-      throw new AmzError({
-        type: 'invalid_param', subtype: 'invalid_time_range', param: '--start', hintAgent: 'fix_param',
-        hintHuman: '--start 必须早于 --end。', message: '--start must be before --end',
-      });
-    }
+    validateIsoTimeRange(flags);
   },
   execute: async (ctx) => {
     const mkt = resolveMarketplace(ctx.flags['marketplace']);

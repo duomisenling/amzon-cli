@@ -23,8 +23,11 @@ import { brokerConfigFromEnv, mintFromBroker } from '../credential/broker.js';
 /** 广告 API v3 的 vendor media type(Accept 与 Content-Type 同值)。 */
 export const ADS_CONTENT_TYPES = {
   spCampaign: 'application/vnd.spCampaign.v3+json',
+  spAdGroup: 'application/vnd.spAdGroup.v3+json',
+  spProductAd: 'application/vnd.spProductAd.v3+json',
   spKeyword: 'application/vnd.spKeyword.v3+json',
   spNegativeKeyword: 'application/vnd.spNegativeKeyword.v3+json',
+  spKeywordRecommendation: 'application/vnd.spkeywordsrecommendation.v5+json',
   createReport: 'application/vnd.createasyncreportrequest.v3+json',
 } as const;
 
@@ -158,6 +161,8 @@ export class AdsClient {
     } = {},
   ): Promise<unknown> {
     const auth = await this.getAuth(opts.region);
+    const replaySafe =
+      method.toUpperCase() === 'GET' || method.toUpperCase() === 'HEAD' || opts.retry5xx === true;
 
     for (let attempt = 0; ; attempt++) {
       const headers: Record<string, string> = {
@@ -179,6 +184,18 @@ export class AdsClient {
         body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
         signal: AbortSignal.timeout(60_000),
       }).catch((err: unknown) => {
+        if (!replaySafe) {
+          throw new AmzError({
+            type: 'upstream_error',
+            subtype: 'ads.write_result_unknown',
+            hintAgent: 'report_to_human',
+            hintHuman:
+              `广告 ${method.toUpperCase()} 写请求发生网络中断或超时，无法判断 Amazon Ads 是否已经执行。` +
+              '不要自动重试；请先查询广告后台或使用只读命令核对结果。',
+            message: `Ads ${method.toUpperCase()} ${path} failed after dispatch; write result is ambiguous: ${err instanceof Error ? err.message : String(err)}`,
+            cause: err,
+          });
+        }
         throw new AmzError({
           type: 'upstream_error',
           subtype: 'ads.network_error',
@@ -197,6 +214,18 @@ export class AdsClient {
         try {
           return JSON.parse(text) as unknown;
         } catch {
+          if (!replaySafe) {
+            throw new AmzError({
+              type: 'upstream_error',
+              subtype: 'ads.write_result_unknown',
+              hintAgent: 'report_to_human',
+              hintHuman:
+                `Amazon Ads 已接受 ${method.toUpperCase()} 写请求并返回 HTTP ${resp.status}，但响应内容无法解析。` +
+                '写入结果可能已经生效；不要重试，请先查询广告后台核对。',
+              message: `Ads ${method.toUpperCase()} ${path} returned HTTP ${resp.status} with invalid JSON; write result is ambiguous: ${text.slice(0, 300)}`,
+              status: resp.status,
+            });
+          }
           throw new AmzError({
             type: 'upstream_error',
             subtype: 'ads.invalid_json_response',
@@ -212,7 +241,7 @@ export class AdsClient {
       const text = await resp.text().catch(() => '');
       const retryable5xx =
         resp.status >= 500 &&
-        (method.toUpperCase() === 'GET' || method.toUpperCase() === 'HEAD' || opts.retry5xx === true);
+        replaySafe;
       if ((resp.status === 429 || retryable5xx) && attempt < 3) {
         const backoffMs = Math.min(2 ** attempt * 1000 + Math.random() * 500, 15_000);
         progress(`· 广告接口返回 ${resp.status},${Math.round(backoffMs / 1000)}s 后重试...`);

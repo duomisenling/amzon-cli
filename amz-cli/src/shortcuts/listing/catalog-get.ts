@@ -8,7 +8,7 @@
 
 import type { ToolDefinition } from '../../tools/types.js';
 import { resolveMarketplace, strFlag } from '../common.js';
-import { simplifyItem } from './catalog-search.js';
+import { simplifyItem, validateCatalogIncludedData } from './catalog-search.js';
 
 export const listingGet: ToolDefinition = {
   service: 'listing',
@@ -25,6 +25,9 @@ export const listingGet: ToolDefinition = {
       desc: '返回的数据集,逗号分隔。默认 summaries,images,salesRanks(常用组合)',
     },
   ],
+  validate: (flags) => {
+    validateCatalogIncludedData(flags);
+  },
   execute: async (ctx) => {
     const mkt = resolveMarketplace(ctx.flags['marketplace']);
     const asin = (strFlag(ctx.flags, 'asin') ?? '').toUpperCase();

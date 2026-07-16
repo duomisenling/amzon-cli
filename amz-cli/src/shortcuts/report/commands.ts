@@ -8,7 +8,7 @@
 import { writeFileSync } from 'node:fs';
 import { AmzError } from '../../internal/errs/errors.js';
 import type { ToolContext, ToolDefinition } from '../../tools/types.js';
-import { OPTIONAL_MARKETPLACE_FLAG, daysAgoIso, optionalRegion, resolveMarketplace, strFlag, validateNumberFlag } from '../common.js';
+import { OPTIONAL_MARKETPLACE_FLAG, daysAgoIso, optionalRegion, resolveMarketplace, strFlag, validateIsoTimeRange, validateNumberFlag } from '../common.js';
 import type { Region } from '../../internal/client/regions.js';
 import {
   downloadReportDocument,
@@ -17,6 +17,7 @@ import {
   requestReport,
   waitForReport,
 } from './infra.js';
+import { sanitizeReportText } from './sanitize.js';
 
 // 已知"必须传 dataStartTime 否则 FATAL"的报告类型。
 // 官方文档标注可选,但实测(2026-07-13,真实账号)不传必 FATAL 且无错误说明;
@@ -73,6 +74,9 @@ export const reportCreate: ToolDefinition = {
     { name: 'start', desc: '数据开始时间,ISO 8601(可选,默认由亚马逊定)' },
     { name: 'end', desc: '数据结束时间,ISO 8601(可选)' },
   ],
+  validate: (flags) => {
+    validateIsoTimeRange(flags);
+  },
   execute: async (ctx) => {
     const mkt = resolveMarketplace(ctx.flags['marketplace']);
     const type = strFlag(ctx.flags, 'type')!;
@@ -106,8 +110,10 @@ async function deliverReport(
   ctx: ToolContext,
   reportDocumentId: string,
   region?: Region,
+  reportType?: string,
 ): Promise<Record<string, unknown>> {
-  const text = await downloadReportDocument(ctx, reportDocumentId, region);
+  const downloaded = await downloadReportDocument(ctx, reportDocumentId, region);
+  const text = sanitizeReportText(reportType, downloaded);
 
   const outPath = strFlag(ctx.flags, 'out');
   if (outPath) {
@@ -166,7 +172,7 @@ export const reportDownload: ToolDefinition = {
         retryable: status.processingStatus === 'IN_QUEUE' || status.processingStatus === 'IN_PROGRESS',
       });
     }
-    return deliverReport(ctx, status.reportDocumentId, region);
+    return deliverReport(ctx, status.reportDocumentId, region, status.reportType);
   },
 };
 
@@ -185,6 +191,7 @@ export const reportRun: ToolDefinition = {
     ...DOWNLOAD_FLAGS,
   ],
   validate: (flags) => {
+    validateIsoTimeRange(flags);
     validateNumberFlag(flags, 'timeout', '--timeout', { min: 1, max: 60 });
     validateNumberFlag(flags, 'maxRows', '--max-rows', { min: 1, max: 100_000, integer: true });
   },
@@ -197,7 +204,7 @@ export const reportRun: ToolDefinition = {
     });
     const timeout = Number(strFlag(ctx.flags, 'timeout') ?? 10);
     const status = await waitForReport(ctx, reportId, timeout, mkt.region);
-    const data = await deliverReport(ctx, status.reportDocumentId!, mkt.region);
+    const data = await deliverReport(ctx, status.reportDocumentId!, mkt.region, type);
     return { reportId, reportType: type, marketplace: mkt.country, ...data };
   },
 };

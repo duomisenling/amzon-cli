@@ -253,6 +253,14 @@ export const listingUpdate: ToolDefinition = {
       input: patches,
     };
   },
+  confirmationRuntimeSnapshot: async (ctx) => {
+    const mkt = resolveMarketplace(ctx.flags['marketplace']);
+    return {
+      sellerId: await resolveSellerId(ctx.flags, mkt.region, ctx.client),
+      region: mkt.region,
+      marketplaceId: mkt.id,
+    };
+  },
   dryRun: async (ctx) => {
     const patches = parsePatches(ctx.flags);
     const mkt = resolveMarketplace(ctx.flags['marketplace']);

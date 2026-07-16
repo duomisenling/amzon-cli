@@ -42,7 +42,12 @@ export function requireDate(
   flagName: string,
 ): string {
   const v = strFlag(flags, key);
-  if (!v || !/^\d{4}-\d{2}-\d{2}$/.test(v)) {
+  const parsed = v ? Date.parse(`${v}T00:00:00.000Z`) : Number.NaN;
+  const valid =
+    Boolean(v && /^\d{4}-\d{2}-\d{2}$/.test(v)) &&
+    Number.isFinite(parsed) &&
+    new Date(parsed).toISOString().slice(0, 10) === v;
+  if (!valid) {
     throw new AmzError({
       type: 'invalid_param',
       subtype: 'ads.invalid_date',
@@ -53,6 +58,24 @@ export function requireDate(
     });
   }
   return v;
+}
+
+/** 校验广告日期范围；同一天的日报允许 start=end。 */
+export function validateDateRange(flags: Record<string, unknown>): void {
+  const start = requireDate(flags, 'start', '--start');
+  const end = strFlag(flags, 'end');
+  if (!end) return;
+  const validEnd = requireDate(flags, 'end', '--end');
+  if (start > validEnd) {
+    throw new AmzError({
+      type: 'invalid_param',
+      subtype: 'ads.invalid_date_range',
+      param: '--start',
+      hintAgent: 'fix_param',
+      hintHuman: '--start 不能晚于 --end。',
+      message: '--start must not be after --end',
+    });
+  }
 }
 
 /** 金额类 flag(预算/竞价)必须为正数;返回数值。 */

@@ -120,3 +120,17 @@ test('Broker seller ID is authoritative and rejects an explicit mismatch', async
     (error) => error?.subtype === 'broker.seller_id_mismatch',
   );
 });
+
+test('confirmation snapshot binds the Seller ID resolved from Broker', async () => {
+  process.env.BROKER_URL = 'https://broker.example.test';
+  const patches = [{ op: 'replace', path: '/attributes/item_name', value: [{ value: 'New name' }] }];
+  const { ctx } = context(patches, { status: 'VALID', issues: [] });
+  ctx.client.getSellerId = async () => 'BROKER_SELLER';
+
+  const snapshot = await listingUpdate.confirmationRuntimeSnapshot(ctx);
+  assert.deepEqual(snapshot, {
+    sellerId: 'BROKER_SELLER',
+    region: 'na',
+    marketplaceId: 'ATVPDKIKX0DER',
+  });
+});

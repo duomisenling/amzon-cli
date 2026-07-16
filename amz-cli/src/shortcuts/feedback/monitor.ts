@@ -3,11 +3,12 @@
 // 复用 report 的异步链路设施,报告类型固定 GET_SELLER_FEEDBACK_DATA。
 // API 限制(规格 §7.1 已注明):这份报告只包含 1-3 星(差评+中评),
 // 拿不到 4-5 星好评——这是亚马逊本身的限制,不是 CLI 的问题。
-// 报告是 TSV,列名由亚马逊定,CLI 原样透传解析结果,不做字段猜测。
+// 报告是 TSV,列名由亚马逊定；输出前按官方字段定义删除 Rater Email。
 
 import type { ToolDefinition } from '../../tools/types.js';
 import { daysAgoIso, resolveMarketplace, strFlag, validateNumberFlag } from '../common.js';
 import { downloadReportDocument, parseReport, requestReport, waitForReport } from '../report/infra.js';
+import { sanitizeReportText } from '../report/sanitize.js';
 
 export const feedbackRun: ToolDefinition = {
   service: 'feedback',
@@ -34,7 +35,8 @@ export const feedbackRun: ToolDefinition = {
       dataStartTime: start,
     });
     const status = await waitForReport(ctx, reportId, Number(strFlag(ctx.flags, 'timeout') ?? 10), mkt.region);
-    const text = await downloadReportDocument(ctx, status.reportDocumentId!, mkt.region);
+    const downloaded = await downloadReportDocument(ctx, status.reportDocumentId!, mkt.region);
+    const text = sanitizeReportText('GET_SELLER_FEEDBACK_DATA', downloaded);
     const parsed = parseReport(text, 1000);
 
     if (parsed.format === 'raw') {

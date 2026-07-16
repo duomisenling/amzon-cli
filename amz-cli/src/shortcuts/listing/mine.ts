@@ -79,6 +79,31 @@ const SELLER_ID_FLAG = {
   desc: '卖家编号(可省略,默认读 .env 的 SELLER_ID)',
 };
 
+const LISTINGS_INCLUDED_DATA = [
+  'summaries',
+  'attributes',
+  'issues',
+  'offers',
+  'fulfillmentAvailability',
+  'procurement',
+  'relationships',
+  'productTypes',
+];
+
+function validateListingsIncludedData(flags: Record<string, unknown>): void {
+  const include = strFlag(flags, 'include');
+  if (!include) return;
+  for (const set of include.split(',').map((s) => s.trim())) {
+    if (!LISTINGS_INCLUDED_DATA.includes(set)) {
+      throw new AmzError({
+        type: 'invalid_param', subtype: 'invalid_included_data', param: '--include', hintAgent: 'fix_param',
+        hintHuman: `--include 里的 "${set}" 无效。可选:${LISTINGS_INCLUDED_DATA.join(' / ')}`,
+        message: `invalid Listings includedData value: ${set}`,
+      });
+    }
+  }
+}
+
 export const listingMine: ToolDefinition = {
   service: 'listing',
   command: 'mine',
@@ -157,6 +182,9 @@ export const listingSku: ToolDefinition = {
       desc: '返回的数据集,默认 summaries,issues,offers,fulfillmentAvailability。可加 attributes/relationships/productTypes',
     },
   ],
+  validate: (flags) => {
+    validateListingsIncludedData(flags);
+  },
   execute: async (ctx) => {
     const mkt = resolveMarketplace(ctx.flags['marketplace']);
     const sellerId = await resolveSellerId(ctx.flags, mkt.region, ctx.client);

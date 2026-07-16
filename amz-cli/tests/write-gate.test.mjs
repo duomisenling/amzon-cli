@@ -104,3 +104,20 @@ test('automation cannot consume a supplied preview token', async () => {
   assert.equal(envelope.error.subtype, 'interactive_terminal_required');
   assert.equal(result.stdout, '');
 });
+
+test('keyword campaign CLI confirmation still requires an interactive human terminal', async () => {
+  const result = await run([
+    'ads',
+    'keyword-campaign-launch',
+    '--plan',
+    'examples/keyword-campaign-plan.example.json',
+    '--confirm',
+    '--preview-token',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+  ]);
+
+  assert.equal(result.code, 10);
+  const envelope = parseErrorEnvelope(result.stderr);
+  assert.equal(envelope.error.subtype, 'interactive_terminal_required');
+  assert.equal(result.stdout, '');
+});

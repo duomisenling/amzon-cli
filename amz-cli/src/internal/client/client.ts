@@ -41,8 +41,10 @@ export class SpApiClient {
   }
 
   async request(method: string, path: string, opts: RequestOptions = {}): Promise<unknown> {
+    const replaySafe =
+      method.toUpperCase() === 'GET' || method.toUpperCase() === 'HEAD' || opts.retry5xx === true;
     for (let attempt = 0; ; attempt++) {
-      const resp = await limiter.schedule(() => this.doFetch(method, path, opts));
+      const resp = await limiter.schedule(() => this.doFetch(method, path, opts, replaySafe));
 
       // 成功
       if (resp.ok) {
@@ -52,6 +54,18 @@ export class SpApiClient {
         try {
           return JSON.parse(text) as unknown;
         } catch {
+          if (!replaySafe) {
+            throw new AmzError({
+              type: 'upstream_error',
+              subtype: 'sp_api.write_result_unknown',
+              hintAgent: 'report_to_human',
+              hintHuman:
+                `Amazon 已接受 ${method.toUpperCase()} 写请求并返回 HTTP ${resp.status}，但响应内容无法解析。` +
+                '写入结果可能已经生效；不要重试，请先用只读查询或 Seller Central 核对。',
+              message: `${method.toUpperCase()} ${path} returned HTTP ${resp.status} with invalid JSON; write result is ambiguous: ${text.slice(0, 300)}`,
+              status: resp.status,
+            });
+          }
           throw new AmzError({
             type: 'upstream_error',
             subtype: 'sp_api.invalid_json_response',
@@ -70,7 +84,7 @@ export class SpApiClient {
       // 默认不能重放；仅 GET/HEAD 和调用方明确标记安全的读式 POST 可以重试。
       const retryable5xx =
         resp.status >= 500 &&
-        (method.toUpperCase() === 'GET' || method.toUpperCase() === 'HEAD' || opts.retry5xx === true);
+        replaySafe;
       if ((resp.status === 429 || retryable5xx) && attempt < MAX_RETRIES) {
         const retryAfterHeader = Number(resp.headers.get('retry-after'));
         const backoffMs = Number.isFinite(retryAfterHeader) && retryAfterHeader > 0
@@ -87,7 +101,12 @@ export class SpApiClient {
     }
   }
 
-  private async doFetch(method: string, path: string, opts: RequestOptions): Promise<Response> {
+  private async doFetch(
+    method: string,
+    path: string,
+    opts: RequestOptions,
+    replaySafe: boolean,
+  ): Promise<Response> {
     const creds = await this.credentials.getCredentials(opts.region);
     const url = new URL(path, creds.endpoint);
     if (opts.query) {
@@ -102,6 +121,18 @@ export class SpApiClient {
       body = JSON.stringify(opts.body);
     }
     return fetch(url, { method, headers, body, signal: AbortSignal.timeout(60_000) }).catch((err: unknown) => {
+      if (!replaySafe) {
+        throw new AmzError({
+          type: 'upstream_error',
+          subtype: 'sp_api.write_result_unknown',
+          hintAgent: 'report_to_human',
+          hintHuman:
+            `${method.toUpperCase()} 写请求发生网络中断或超时，无法判断 Amazon 是否已经执行。` +
+            '不要自动重试；请先用只读查询或 Seller Central 核对结果。',
+          message: `${method.toUpperCase()} request to ${path} failed after dispatch; write result is ambiguous: ${err instanceof Error ? err.message : String(err)}`,
+          cause: err,
+        });
+      }
       throw new AmzError({
         type: 'upstream_error',
         subtype: 'sp_api.network_error',

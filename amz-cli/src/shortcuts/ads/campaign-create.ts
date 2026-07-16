@@ -19,7 +19,7 @@
 import { ADS_CONTENT_TYPES } from '../../internal/client/ads-client.js';
 import type { ToolDefinition } from '../../tools/types.js';
 import { strFlag } from '../common.js';
-import { ADS_REGION_FLAG, adsRegion, requireDate, requirePositiveAmount, requireProfileId } from './common.js';
+import { ADS_REGION_FLAG, adsRegion, requireDate, requirePositiveAmount, requireProfileId, validateDateRange } from './common.js';
 
 /** 从创建响应中尽力提取 campaignId(结构因响应版本而异,取不到不猜)。 */
 function extractCampaignId(resp: unknown): string | undefined {
@@ -81,6 +81,7 @@ export const adsCampaignCreate: ToolDefinition = {
   validate: (flags) => {
     requireProfileId(flags);
     buildPayload(flags); // 本地校验全部参数,坏参数不消耗 API
+    if (strFlag(flags, 'end')) validateDateRange(flags);
   },
   describe: (flags) => {
     const state = strFlag(flags, 'state') ?? 'PAUSED';

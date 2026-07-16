@@ -36,6 +36,7 @@
 
 import { createServer } from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
+import { parseMintApi, readRequestBody } from './protocol.mjs';
 
 const LWA_TOKEN_URL = 'https://api.amazon.com/auth/o2/token';
 
@@ -186,7 +187,15 @@ const server = createServer(async (req, res) => {
       }
 
       let body = '';
-      for await (const chunk of req) body += chunk;
+      try {
+        body = await readRequestBody(req);
+      } catch (error) {
+        if (error?.code === 'BODY_TOO_LARGE') {
+          audit({ event: 'mint_denied', member, reason: 'body_too_large' });
+          return json(res, 413, { error: 'body_too_large' });
+        }
+        throw error;
+      }
       let parsed;
       try {
         parsed = JSON.parse(body || '{}');
@@ -195,7 +204,7 @@ const server = createServer(async (req, res) => {
       }
 
       const store = String(parsed.store ?? '').toUpperCase().replace(/[^A-Z0-9_]/g, '');
-      const api = parsed.api === 'ads' ? 'ads' : 'sp-api';
+      const api = parseMintApi(parsed.api);
       // region 直接给,或从 marketplace 国家码映射(与规格 §5.2 的 body 等价)
       let region = String(parsed.region ?? '').toLowerCase();
       if (!region && parsed.marketplace) {
@@ -204,6 +213,7 @@ const server = createServer(async (req, res) => {
       if (!region) region = 'na';
 
       if (!store) return json(res, 400, { error: 'missing_store' });
+      if (!api) return json(res, 400, { error: 'invalid_api', detail: String(parsed.api ?? '') });
       if (!SP_ENDPOINTS[region]) return json(res, 400, { error: 'invalid_region', detail: region });
 
       const authorization = authorize(member, { store, api, region });
@@ -228,6 +238,9 @@ const server = createServer(async (req, res) => {
 });
 
 const port = Number(process.env.PORT ?? 8080);
+if (!Number.isInteger(port) || port < 1 || port > 65_535) {
+  throw new Error(`PORT must be an integer in [1,65535], got: ${process.env.PORT ?? ''}`);
+}
 server.listen(port, () => {
   audit({ event: 'startup', port, team_members: parseTeamTokens().map((t) => t.name) });
 });

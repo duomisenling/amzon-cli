@@ -11,7 +11,7 @@
 //                         一律拒绝,防止"顺手把预览和执行串进一个 workflow"
 //                         (规格 §8.2 rule 2:不能只靠一个 flag)
 
-import { createHash, randomInt } from 'node:crypto';
+import { randomInt } from 'node:crypto';
 import { createInterface } from 'node:readline/promises';
 import { Command } from 'commander';
 import { AmzError } from '../internal/errs/errors.js';
@@ -25,6 +25,7 @@ import {
   verifyAndConsumePreviewToken,
   verifyPreviewToken,
 } from '../internal/confirmation/preview-token.js';
+import { runtimeConfirmationSnapshot } from '../internal/confirmation/runtime-snapshot.js';
 import type { ToolContext, ToolDefinition } from './types.js';
 
 /**
@@ -154,9 +155,9 @@ async function runTool(tool: ToolDefinition, flags: Record<string, unknown>): Pr
           message: `${tool.service} ${tool.command} declares mutation=${tool.mutation} but has no dryRun`,
         });
       }
-      const snapshotBefore = captureConfirmation(tool, flags).snapshot;
+      const snapshotBefore = (await captureConfirmation(tool, flags, ctx)).snapshot;
       const preview = await tool.dryRun(ctx);
-      const snapshotAfter = captureConfirmation(tool, flags).snapshot;
+      const snapshotAfter = (await captureConfirmation(tool, flags, ctx)).snapshot;
       if (JSON.stringify(snapshotBefore) !== JSON.stringify(snapshotAfter)) {
         throw new AmzError({
           type: 'invalid_param',
@@ -217,7 +218,7 @@ async function runTool(tool: ToolDefinition, flags: Record<string, unknown>): Pr
 
     // 先要求真实终端，再校验令牌，防止普通非交互流程抢先用掉交给真人的令牌。
     assertInteractiveTerminal(tool);
-    const beforeConfirmation = captureConfirmation(tool, flags);
+    const beforeConfirmation = await captureConfirmation(tool, flags, ctx);
     verifyPreviewToken(
       operationName(tool),
       flags,
@@ -245,7 +246,7 @@ async function runTool(tool: ToolDefinition, flags: Record<string, unknown>): Pr
 
     // 人工确认后重新读取一次，并把这次读取的内容同时用于哈希校验和实际执行。
     // 文件在确认提示期间被替换会令牌不匹配；校验后不再按路径重读。
-    const confirmed = captureConfirmation(tool, flags);
+    const confirmed = await captureConfirmation(tool, flags, ctx);
     verifyAndConsumePreviewToken(
       operationName(tool),
       flags,
@@ -264,52 +265,24 @@ function operationName(tool: ToolDefinition): string {
   return `${tool.service} ${tool.command}`;
 }
 
-function captureConfirmation(
+async function captureConfirmation(
   tool: ToolDefinition,
   flags: Record<string, unknown>,
-): { snapshot: unknown; input: unknown } {
+  ctx: ToolContext,
+): Promise<{ snapshot: unknown; input: unknown }> {
   const captured = tool.confirmationInput
     ? tool.confirmationInput(flags)
     : { snapshot: tool.confirmationSnapshot?.(flags), input: undefined };
   return {
     snapshot: {
       runtime: runtimeConfirmationSnapshot(),
+      remoteIdentity: tool.confirmationRuntimeSnapshot
+        ? await tool.confirmationRuntimeSnapshot(ctx)
+        : undefined,
       commandInput: captured.snapshot,
     },
     input: captured.input,
   };
-}
-
-/**
- * 绑定会影响目标账户/区域的运行时配置。敏感值只参与内存中的 SHA-256，
- * 令牌记录不会保存 refresh token、team token 或 client secret 明文。
- */
-function runtimeConfirmationSnapshot(): Record<string, unknown> {
-  const plainKeys = [
-    'BROKER_URL',
-    'STORE',
-    'SP_API_REGION',
-    'ADS_REGION',
-    'LWA_CLIENT_ID',
-    'ADS_CLIENT_ID',
-    'SELLER_ID',
-    'SELLER_ID_NA',
-    'SELLER_ID_EU',
-    'SELLER_ID_FE',
-  ];
-  const secretKeys = [
-    'TEAM_TOKEN',
-    'LWA_REFRESH_TOKEN',
-    'LWA_REFRESH_TOKEN_NA',
-    'LWA_REFRESH_TOKEN_EU',
-    'LWA_REFRESH_TOKEN_FE',
-    'ADS_REFRESH_TOKEN',
-  ];
-  const plain = Object.fromEntries(plainKeys.map((key) => [key, process.env[key] ?? '']));
-  const credentialHash = createHash('sha256')
-    .update(JSON.stringify(secretKeys.map((key) => process.env[key] ?? '')))
-    .digest('hex');
-  return { ...plain, credentialHash };
 }
 
 /**

@@ -11,7 +11,7 @@
 
 import { ADS_CONTENT_TYPES } from '../../internal/client/ads-client.js';
 import type { ToolDefinition } from '../../tools/types.js';
-import { strFlag } from '../common.js';
+import { strFlag, validateNumberFlag } from '../common.js';
 import { ADS_REGION_FLAG, adsRegion, requireProfileId } from './common.js';
 
 export const adsProfiles: ToolDefinition = {
@@ -43,7 +43,12 @@ export const adsCampaigns: ToolDefinition = {
       enum: ['ENABLED', 'PAUSED', 'ARCHIVED'],
     },
     { name: 'max', desc: '最多返回条数,默认 100' },
+    { name: 'next-token', desc: '分页游标(上一页返回的 nextToken)' },
   ],
+  validate: (flags) => {
+    requireProfileId(flags);
+    validateNumberFlag(flags, 'max', '--max', { min: 1, max: 100, integer: true });
+  },
   execute: async (ctx) => {
     const profileId = requireProfileId(ctx.flags);
     const state = strFlag(ctx.flags, 'state');
@@ -57,6 +62,7 @@ export const adsCampaigns: ToolDefinition = {
       retry5xx: true,
       body: {
         maxResults: max,
+        ...(strFlag(ctx.flags, 'nextToken') ? { nextToken: strFlag(ctx.flags, 'nextToken') } : {}),
         ...(state ? { stateFilter: { include: [state] } } : {}),
       },
     })) as { campaigns?: Array<Record<string, unknown>>; nextToken?: string } | null;

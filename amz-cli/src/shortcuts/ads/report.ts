@@ -17,7 +17,7 @@ import { ADS_CONTENT_TYPES } from '../../internal/client/ads-client.js';
 import { AmzError } from '../../internal/errs/errors.js';
 import type { ToolContext, ToolDefinition } from '../../tools/types.js';
 import { fetchDocumentBuffer, strFlag, validateNumberFlag } from '../common.js';
-import { ADS_REGION_FLAG, adsRegion, requireDate, requireProfileId } from './common.js';
+import { ADS_REGION_FLAG, adsRegion, requireDate, requireProfileId, validateDateRange } from './common.js';
 
 // 官方 Postman 示例的默认列(SP campaigns 日报)
 const DEFAULT_COLUMNS =
@@ -226,8 +226,7 @@ export const adsReportRun: ToolDefinition = {
   ],
   validate: (flags) => {
     requireProfileId(flags);
-    requireDate(flags, 'start', '--start');
-    requireDate(flags, 'end', '--end');
+    validateDateRange(flags);
     validateNumberFlag(flags, 'timeout', '--timeout', { min: 1, max: 60 });
   },
   execute: async (ctx) => {

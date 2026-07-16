@@ -12,7 +12,7 @@
 import { AmzError } from '../../internal/errs/errors.js';
 import { ADS_CONTENT_TYPES } from '../../internal/client/ads-client.js';
 import type { ToolDefinition } from '../../tools/types.js';
-import { strFlag } from '../common.js';
+import { strFlag, validateNumberFlag } from '../common.js';
 import { ADS_REGION_FLAG, adsRegion, requirePositiveAmount, requireProfileId } from './common.js';
 
 // —— 读:列关键词 ——
@@ -27,7 +27,12 @@ export const adsKeywords: ToolDefinition = {
     { name: 'campaign-id', desc: '按广告活动过滤(可选)' },
     { name: 'state', desc: '按状态过滤(可选)', enum: ['ENABLED', 'PAUSED', 'ARCHIVED'] },
     { name: 'max', desc: '最多返回条数,默认 100' },
+    { name: 'next-token', desc: '分页游标(上一页返回的 nextToken)' },
   ],
+  validate: (flags) => {
+    requireProfileId(flags);
+    validateNumberFlag(flags, 'max', '--max', { min: 1, max: 100, integer: true });
+  },
   execute: async (ctx) => {
     const profileId = requireProfileId(ctx.flags);
     const campaignId = strFlag(ctx.flags, 'campaignId');
@@ -41,6 +46,7 @@ export const adsKeywords: ToolDefinition = {
       retry5xx: true,
       body: {
         maxResults: Number(strFlag(ctx.flags, 'max') ?? 100),
+        ...(strFlag(ctx.flags, 'nextToken') ? { nextToken: strFlag(ctx.flags, 'nextToken') } : {}),
         ...(campaignId ? { campaignIdFilter: { include: [campaignId] } } : {}),
         ...(state ? { stateFilter: { include: [state] } } : {}),
       },

@@ -81,6 +81,11 @@ export interface ToolDefinition {
    * 若提供，优先于 confirmationSnapshot。
    */
   confirmationInput?: (flags: Record<string, unknown>) => { snapshot: unknown; input: unknown };
+  /**
+   * 需要从当前凭证服务动态解析的目标身份（例如 Broker 返回的 Seller ID）。
+   * 该值会同时绑定到 dry-run 与 confirm，防止两次命令之间远端账户映射变化。
+   */
+  confirmationRuntimeSnapshot?: (ctx: ToolContext) => Promise<unknown>;
   /** 主逻辑:返回值 = stdout 的 data 字段(业务代码不直接写 stdout) */
   execute: (ctx: ToolContext) => Promise<unknown>;
 }

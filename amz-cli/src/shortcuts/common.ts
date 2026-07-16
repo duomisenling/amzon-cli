@@ -95,6 +95,50 @@ export function daysAgoIso(days: number): string {
     .replace(/\.\d{3}Z$/, 'Z');
 }
 
+/** 校验可选 ISO 8601 起止时间，并确保开始早于结束。 */
+export function validateIsoTimeRange(
+  flags: Record<string, unknown>,
+  startKey = 'start',
+  endKey = 'end',
+): void {
+  const start = strFlag(flags, startKey);
+  const end = strFlag(flags, endKey);
+  if (start && !isIso8601(start)) {
+    throw new AmzError({
+      type: 'invalid_param', subtype: 'invalid_start_time', param: '--start', hintAgent: 'fix_param',
+      hintHuman: '--start 必须是合法的 ISO 8601 时间。', message: `invalid --start: ${start}`,
+    });
+  }
+  if (end && !isIso8601(end)) {
+    throw new AmzError({
+      type: 'invalid_param', subtype: 'invalid_end_time', param: '--end', hintAgent: 'fix_param',
+      hintHuman: '--end 必须是合法的 ISO 8601 时间。', message: `invalid --end: ${end}`,
+    });
+  }
+  if (start && end && Date.parse(start) >= Date.parse(end)) {
+    throw new AmzError({
+      type: 'invalid_param', subtype: 'invalid_time_range', param: '--start', hintAgent: 'fix_param',
+      hintHuman: '--start 必须早于 --end。', message: '--start must be before --end',
+    });
+  }
+}
+
+function isIso8601(value: string): boolean {
+  if (
+    !/^\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2}))?$/.test(value) ||
+    !Number.isFinite(Date.parse(value))
+  ) {
+    return false;
+  }
+  const [year, month, day] = value.slice(0, 10).split('-').map(Number);
+  const calendarDate = new Date(Date.UTC(year!, month! - 1, day!));
+  return (
+    calendarDate.getUTCFullYear() === year &&
+    calendarDate.getUTCMonth() + 1 === month &&
+    calendarDate.getUTCDate() === day
+  );
+}
+
 /**
  * 下载亚马逊签发的文档(预签名 URL,故意不走带认证头的 client),
  * 校验 HTTP 状态并按需 GZIP 解压,返回原始 Buffer。
