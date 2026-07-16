@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict';
 import { afterEach, test } from 'node:test';
-import { brokerConfigFromEnv, mintFromBroker } from '../dist/internal/credential/broker.js';
+import {
+  BrokerCredentialProvider,
+  brokerConfigFromEnv,
+  mintFromBroker,
+} from '../dist/internal/credential/broker.js';
 
 const originalFetch = globalThis.fetch;
 
@@ -41,10 +45,29 @@ test('rejects a non-Amazon endpoint returned by Broker', async () => {
 });
 
 test('SP-API fallback follows the requested region', async () => {
-  mockMintResponse({ access_token: 'short-lived-token', expires_in: 3600 });
+  mockMintResponse({
+    access_token: 'short-lived-token',
+    expires_in: 3600,
+    seller_id: 'SELLER_EU',
+  });
 
   const result = await mintFromBroker(cfg, 'sp-api', 'eu');
   assert.equal(result.endpoint, 'https://sellingpartnerapi-eu.amazon.com');
+  assert.equal(result.sellerId, 'SELLER_EU');
+});
+
+test('Broker credential provider preserves Seller ID in its cached credentials', async () => {
+  mockMintResponse({
+    access_token: 'short-lived-token',
+    expires_in: 3600,
+    seller_id: 'SELLER_EU',
+  });
+  const provider = new BrokerCredentialProvider(cfg);
+
+  const first = await provider.getCredentials('eu');
+  const cached = await provider.getCredentials('eu');
+  assert.equal(first.sellerId, 'SELLER_EU');
+  assert.equal(cached.sellerId, 'SELLER_EU');
 });
 
 test('Ads fallback uses the Ads endpoint for the requested region', async () => {

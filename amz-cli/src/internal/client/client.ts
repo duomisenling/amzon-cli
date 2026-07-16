@@ -31,6 +31,11 @@ const MAX_RETRIES = 4;
 export class SpApiClient {
   constructor(private readonly credentials: CredentialProvider) {}
 
+  /** 返回当前凭证绑定店铺在指定区域的 Seller ID（Broker 模式使用）。 */
+  async getSellerId(region?: Region): Promise<string | undefined> {
+    return (await this.credentials.getCredentials(region)).sellerId;
+  }
+
   async get(path: string, query?: RequestOptions['query'], region?: Region): Promise<unknown> {
     return this.request('GET', path, { query, region });
   }

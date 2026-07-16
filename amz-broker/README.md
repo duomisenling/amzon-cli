@@ -22,6 +22,7 @@ refresh_token(规格 §5.1)。
 | `LWA_CLIENT_ID` | SP-API 应用 client_id | `amzn1.application-oa2-client.xxx` |
 | `LWA_CLIENT_SECRET` | SP-API 应用 client_secret | `amzn1.oa2-cs.v1.xxx` |
 | `RT_SP_<店铺>_<区域>` | 各店铺 SP refresh_token,区域 NA/EU/FE | `RT_SP_SHOP_A_NA=Atzr\|xxx` |
+| `SELLER_ID_<店铺>_<区域>` | 对应店铺、区域的 Seller ID；Listing 命令需要 | `SELLER_ID_SHOP_A_NA=A1EXAMPLE` |
 | `ADS_CLIENT_ID` | 广告应用 client_id(拿到广告准入后配) | 同上格式 |
 | `ADS_CLIENT_SECRET` | 广告应用 client_secret | |
 | `RT_ADS_<店铺>` | 各店铺广告 refresh_token | `RT_ADS_SHOP_A=Atzr\|yyy` |
@@ -40,7 +41,7 @@ POST /token/mint
      Headers: X-Team-Token: <团队令牌>
      Body:    {"store":"SHOP_A", "api":"sp-api"|"ads", "region":"na"}
               (也接受 "marketplace":"US" 代替 region,自动映射)
-     → 200 {access_token, expires_in, endpoint[, client_id]}
+     → 200 {access_token, expires_in, endpoint[, client_id][, seller_id]}
      → 401 团队令牌无效 | 403 无店铺/API/区域权限
      → 404 店铺未配置 | 502 refresh token 失效
 ```
@@ -61,6 +62,7 @@ POST /token/mint
 - 团队令牌用恒定时间比较(防时序攻击)
 - 每个成员必须通过 `TEAM_ACCESS` 显式获准店铺、API 和区域；未配置默认拒绝
 - 任何响应都不包含 refresh_token / client_secret
+- SP-API 响应可包含与获准店铺、区域绑定的 `seller_id`，用于 CLI 构造 Listing 路径
 - token 进程内缓存(提前 120 秒过期),减少对 LWA 的调用
 - 只有 `/token/mint` 一个功能接口——不代理业务请求,攻击面最小
 - 生产部署必须使用 HTTPS；CLI 仅允许 localhost/127.0.0.1 开发环境使用 HTTP

@@ -16,6 +16,8 @@
 //   LWA_CLIENT_SECRET
 //   RT_SP_<店铺>_<区域>       各店铺 SP refresh_token,区域 NA/EU/FE
 //                            例:RT_SP_SHOP_A_NA=Atzr|xxx
+//   SELLER_ID_<店铺>_<区域>   各店铺、区域的 Seller ID（Listing 命令需要）
+//                            例:SELLER_ID_SHOP_A_NA=A1EXAMPLE
 //   ADS_CLIENT_ID            广告应用凭证(可与 LWA_* 相同,分开配置)
 //   ADS_CLIENT_SECRET
 //   RT_ADS_<店铺>            各店铺广告 refresh_token(广告无区域之分,LWA 通用)
@@ -119,6 +121,8 @@ async function mintToken({ store, api, region }) {
     clientId = process.env.LWA_CLIENT_ID;
     clientSecret = process.env.LWA_CLIENT_SECRET;
     endpoint = SP_ENDPOINTS[region];
+    const sellerId = process.env[`SELLER_ID_${store}_${region.toUpperCase()}`]?.trim();
+    if (sellerId) extra = { seller_id: sellerId };
   } else {
     refreshToken = process.env[`RT_ADS_${store}`];
     clientId = process.env.ADS_CLIENT_ID;

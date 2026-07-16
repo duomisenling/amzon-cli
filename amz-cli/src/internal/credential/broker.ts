@@ -91,7 +91,13 @@ export async function mintFromBroker(
   cfg: BrokerConfig,
   api: 'sp-api' | 'ads',
   region?: Region,
-): Promise<{ accessToken: string; expiresIn: number; endpoint: string; clientId?: string }> {
+): Promise<{
+  accessToken: string;
+  expiresIn: number;
+  endpoint: string;
+  clientId?: string;
+  sellerId?: string;
+}> {
   const resp = await fetch(new URL('/token/mint', cfg.brokerUrl), {
     method: 'POST',
     headers: {
@@ -165,11 +171,14 @@ export async function mintFromBroker(
     expiresIn: typeof body.expires_in === 'number' ? body.expires_in : 3600,
     endpoint,
     ...(typeof body.client_id === 'string' ? { clientId: body.client_id } : {}),
+    ...(typeof body.seller_id === 'string' && body.seller_id.trim() !== ''
+      ? { sellerId: body.seller_id.trim() }
+      : {}),
   };
 }
 
 export class BrokerCredentialProvider implements CredentialProvider {
-  private cache = new Map<Region, { token: string; endpoint: string; expiresAt: number }>();
+  private cache = new Map<Region, { token: string; endpoint: string; expiresAt: number; sellerId?: string }>();
 
   constructor(private readonly cfg: BrokerConfig) {}
 
@@ -177,14 +186,25 @@ export class BrokerCredentialProvider implements CredentialProvider {
     const r = region ?? this.cfg.region;
     const cached = this.cache.get(r);
     if (cached && Date.now() < cached.expiresAt) {
-      return { accessToken: cached.token, endpoint: cached.endpoint, region: r };
+      return {
+        accessToken: cached.token,
+        endpoint: cached.endpoint,
+        region: r,
+        ...(cached.sellerId ? { sellerId: cached.sellerId } : {}),
+      };
     }
     const minted = await mintFromBroker(this.cfg, 'sp-api', r);
     this.cache.set(r, {
       token: minted.accessToken,
       endpoint: minted.endpoint,
       expiresAt: Date.now() + (minted.expiresIn - 60) * 1000,
+      ...(minted.sellerId ? { sellerId: minted.sellerId } : {}),
     });
-    return { accessToken: minted.accessToken, endpoint: minted.endpoint, region: r };
+    return {
+      accessToken: minted.accessToken,
+      endpoint: minted.endpoint,
+      region: r,
+      ...(minted.sellerId ? { sellerId: minted.sellerId } : {}),
+    };
   }
 }

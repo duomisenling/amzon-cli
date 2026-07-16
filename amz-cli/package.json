@@ -9,7 +9,7 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsx src/cli.ts",
-    "test": "npm run build && node --test tests/write-gate.test.mjs tests/broker.test.mjs tests/preview-token.test.mjs tests/validation.test.mjs tests/retry-policy.test.mjs tests/ads-write.test.mjs",
+    "test": "npm run build && node --test tests/write-gate.test.mjs tests/broker.test.mjs tests/preview-token.test.mjs tests/validation.test.mjs tests/retry-policy.test.mjs tests/ads-write.test.mjs tests/account.test.mjs tests/listing-update.test.mjs tests/listing-schema.test.mjs",
     "typecheck": "tsc --noEmit"
   },
   "engines": {

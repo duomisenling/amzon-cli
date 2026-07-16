@@ -114,7 +114,7 @@ export const listingSchema: ToolDefinition = {
   execute: async (ctx) => {
     const mkt = resolveMarketplace(ctx.flags['marketplace']);
     const productType = strFlag(ctx.flags, 'productType')!;
-    const sellerId = resolveSellerId(ctx.flags, mkt.region);
+    const sellerId = await resolveSellerId(ctx.flags, mkt.region, ctx.client);
     const requirementsEnforced = strFlag(ctx.flags, 'requirementsEnforced') ?? 'NOT_ENFORCED';
     const parentageLevel = strFlag(ctx.flags, 'parentageLevel');
 

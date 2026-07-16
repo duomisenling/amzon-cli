@@ -14,6 +14,8 @@ export interface AccessCredentials {
   /** 该凭证对应的 SP-API 端点 */
   endpoint: string;
   region: Region;
+  /** Broker 可随店铺/区域返回对应 Seller ID，供 Listing 路径使用。 */
+  sellerId?: string;
 }
 
 export interface CredentialProvider {

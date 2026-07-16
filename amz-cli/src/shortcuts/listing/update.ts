@@ -23,10 +23,12 @@ import { resolveSellerId } from './mine.js';
 import { isSandboxMode } from '../../internal/client/regions.js';
 
 interface JsonPatch {
-  op: string;
+  op: 'add' | 'replace' | 'merge' | 'delete';
   path: string;
-  value?: unknown;
+  value?: Array<Record<string, unknown>>;
 }
+
+const PATCH_OPS = new Set<JsonPatch['op']>(['add', 'replace', 'merge', 'delete']);
 
 function parsePatches(flags: Record<string, unknown>): JsonPatch[] {
   let raw = strFlag(flags, 'patches');
@@ -81,15 +83,52 @@ function parsePatches(flags: Record<string, unknown>): JsonPatch[] {
       message: '--patches must be a non-empty array of JSON Patch operations',
     });
   }
-  for (const p of parsed) {
-    if (typeof p !== 'object' || p === null || !('op' in p) || !('path' in p)) {
+  for (const [index, item] of parsed.entries()) {
+    if (typeof item !== 'object' || item === null || Array.isArray(item)) {
       throw new AmzError({
         type: 'invalid_param',
         subtype: 'invalid_patch_op',
         param: '--patches',
         hintAgent: 'fix_param',
-        hintHuman: '每个 patch 必须包含 op(如 replace)和 path(如 /attributes/...)。',
-        message: `invalid patch item: ${JSON.stringify(p)}`,
+        hintHuman: `第 ${index + 1} 个 patch 必须是 JSON 对象。`,
+        message: `patch item ${index + 1} is not an object: ${JSON.stringify(item)}`,
+      });
+    }
+    const p = item as Record<string, unknown>;
+    if (typeof p.op !== 'string' || !PATCH_OPS.has(p.op as JsonPatch['op'])) {
+      throw new AmzError({
+        type: 'invalid_param',
+        subtype: 'invalid_patch_operation',
+        param: '--patches',
+        hintAgent: 'fix_param',
+        hintHuman: `第 ${index + 1} 个 patch 的 op 无效,只能是 add / replace / merge / delete。`,
+        message: `unsupported patch op at item ${index + 1}: ${JSON.stringify(p.op)}`,
+      });
+    }
+    if (typeof p.path !== 'string' || !/^\/attributes\/[^/]+$/.test(p.path)) {
+      throw new AmzError({
+        type: 'invalid_param',
+        subtype: 'invalid_patch_path',
+        param: '--patches',
+        hintAgent: 'fix_param',
+        hintHuman:
+          `第 ${index + 1} 个 patch 的 path 无效。Listings Items API 只能修改顶层属性,` +
+          '格式必须是 /attributes/<字段名>,不能继续写嵌套路径。',
+        message: `patch path at item ${index + 1} must target one top-level attribute: ${JSON.stringify(p.path)}`,
+      });
+    }
+    if (
+      'value' in p &&
+      (!Array.isArray(p.value) ||
+        p.value.some((value) => typeof value !== 'object' || value === null || Array.isArray(value)))
+    ) {
+      throw new AmzError({
+        type: 'invalid_param',
+        subtype: 'invalid_patch_value',
+        param: '--patches',
+        hintAgent: 'fix_param',
+        hintHuman: `第 ${index + 1} 个 patch 的 value 必须是 JSON 对象数组,具体对象结构以 listing schema 为准。`,
+        message: `patch value at item ${index + 1} must be an array of objects`,
       });
     }
   }
@@ -111,7 +150,7 @@ async function callPatch(
   opts: { validationPreview: boolean; patches?: JsonPatch[] },
 ): Promise<Record<string, unknown>> {
   const mkt = resolveMarketplace(ctx.flags['marketplace']);
-  const sellerId = resolveSellerId(ctx.flags, mkt.region);
+  const sellerId = await resolveSellerId(ctx.flags, mkt.region, ctx.client);
   const sku = strFlag(ctx.flags, 'sku')!;
   const productType = strFlag(ctx.flags, 'productType')!;
   const patches = opts.patches ?? parsePatches(ctx.flags);
@@ -133,6 +172,41 @@ async function callPatch(
     body: { productType, patches },
     region: mkt.region,
   })) as Record<string, unknown>;
+}
+
+function assertValidationPassed(validation: Record<string, unknown>): void {
+  const issues = Array.isArray(validation.issues)
+    ? validation.issues.filter((issue): issue is Record<string, unknown> =>
+        typeof issue === 'object' && issue !== null && !Array.isArray(issue))
+    : [];
+  const errors = issues.filter(
+    (issue) => typeof issue.severity === 'string' && issue.severity.toUpperCase() === 'ERROR',
+  );
+  if (validation.status === 'VALID' && errors.length === 0) return;
+
+  if (validation.status === 'INVALID' || errors.length > 0) {
+    throw new AmzError({
+      type: 'invalid_param',
+      subtype: 'listing.validation_failed',
+      param: '--patches',
+      hintAgent: 'fix_param',
+      hintHuman:
+        `Amazon 预览校验未通过(status=${String(validation.status ?? 'missing')},` +
+        `ERROR=${errors.length})。请根据 issues 修正 patch 后重新 --dry-run；本次不会生成确认令牌。`,
+      message: `listing validation preview failed: ${JSON.stringify(validation).slice(0, 2000)}`,
+    });
+  }
+
+  throw new AmzError({
+    type: 'upstream_error',
+    subtype: 'listing.validation_unexpected_status',
+    hintAgent: 'report_to_human',
+    hintHuman:
+      `Amazon 预览返回了非预期状态 ${String(validation.status ?? 'missing')}。` +
+      '为安全起见本次不会生成确认令牌,请稍后重新预览。',
+    message: `unexpected listing validation preview response: ${JSON.stringify(validation).slice(0, 2000)}`,
+    retryable: true,
+  });
 }
 
 export const listingUpdate: ToolDefinition = {
@@ -182,7 +256,7 @@ export const listingUpdate: ToolDefinition = {
   dryRun: async (ctx) => {
     const patches = parsePatches(ctx.flags);
     const mkt = resolveMarketplace(ctx.flags['marketplace']);
-    const sellerId = resolveSellerId(ctx.flags, mkt.region);
+    const sellerId = await resolveSellerId(ctx.flags, mkt.region, ctx.client);
     const sku = strFlag(ctx.flags, 'sku')!;
 
     // 沙盒模式:静态沙盒只匹配预定义参数,拉当前值一步没有对应 mock,
@@ -190,6 +264,7 @@ export const listingUpdate: ToolDefinition = {
     if (isSandboxMode()) {
       ctx.progress('· [沙盒 dry-run] 跳过当前值拉取,直接调 VALIDATION_PREVIEW...');
       const validation = await callPatch(ctx, { validationPreview: true });
+      assertValidationPassed(validation);
       return {
         sku,
         marketplace: mkt.country,
@@ -215,6 +290,7 @@ export const listingUpdate: ToolDefinition = {
 
     ctx.progress('· [dry-run 2/2] 调用官方 VALIDATION_PREVIEW 服务端校验(不落库)...');
     const validation = await callPatch(ctx, { validationPreview: true });
+    assertValidationPassed(validation);
 
     return {
       sku,

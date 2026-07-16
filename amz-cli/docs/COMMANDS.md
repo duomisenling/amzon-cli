@@ -51,6 +51,7 @@ amz-cli inventory list --marketplace US
 **多账号(店铺)**:所有命令支持全局 `--account <名称>` 切换账号:
 - 本地模式:凭证读 `~/.amz-cli/accounts/<名称>.env`(格式同 `.env.example`,每个店铺一份);
 - Broker 模式:直接切换店铺代号,权限由 Broker 端的 TEAM_ACCESS 策略控制;
+- Broker 的 Listing 命令还要求管理员在服务端配置对应的 `SELLER_ID_<店铺>_<区域>`;
 - 不传 `--account` = 用项目目录的默认 `.env`,行为与从前完全一致;
 - 账号不存在会**明确报错**,绝不会静默用默认凭证冒充所选账号。
 
@@ -213,7 +214,7 @@ amz-cli listing schema --marketplace US --product-type ROTATING_TRAY --attribute
 **常见字段对照(最终以你的产品类型 schema 实际返回为准,不同类型可能不同)**:
 - 标题 = `item_name`
 - 五点/卖点 = `bullet_point`
-- 商品亮点(Item Highlights)按市场和产品类型逐步开放——某产品类型实测字段名为 `title_differentiation`(标题少于 75 字符时才显示,填卖点短语、别重复标题),**其他类型务必先 `--grep title` / `--grep highlight` 查到再用**,查不到 = 该类型还没开放
+- 商品亮点(Item Highlights)按市场和产品类型逐步开放。字段名和结构只能以当前店铺、市场、产品类型的 schema 为准；先用 `--grep title` / `--grep highlight` 查找，不能把其他类型见过的字段名直接套用。Amazon 公告中的标题限制是 **≤75 字符**。
 
 ### listing update 🔒 — 编辑 listing
 
@@ -226,9 +227,9 @@ amz-cli listing update ... --confirm --preview-token <preview_token>
 
 `--product-type` 用 `listing sku --include productTypes` 查;`--patches` 是 JSON Patch 格式(让 Agent 帮你拼,人只负责核对预览)。
 
-两个实测过的坑:
-- **预览报 8560(信息不足以匹配 ASIN)**:如果你的 SKU 是挂靠型 listing(卖家数据层只有报价/图片,没有标题品牌),patch 里加一条 `{"op":"add","path":"/attributes/merchant_suggested_asin","value":[{"marketplace_id":"...","value":"该SKU自己的ASIN"}]}` 即可通过;
-- **商品亮点报 100476**:亚马逊强制"标题 ≤75 字符才能用 Item Highlights"——想加亮点,先把 `item_name` 压到 75 字符以内(这不只是展示规则,校验层直接拦)。
+遇到预览错误时，以本次响应的 `issues` 和当前 schema 为准：
+- **8560** 可能与商品身份信息不足有关，但不能无条件添加 `merchant_suggested_asin`。只有当前 schema 确实包含该字段、ASIN 已核对且 issues 指向此类缺失时，才按 schema 结构补充后重新预览；
+- **100476** 表示当前提交的属性不受支持时，不要只靠缩短标题反复提交。先确认标题符合 Amazon 公告的 ≤75 字符要求，再检查当前 schema 是否实际开放 Item Highlights；查不到对应字段就停止并向用户说明。
 
 ---
 

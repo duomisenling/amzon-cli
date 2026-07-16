@@ -12,29 +12,66 @@
 // (提示:可用 pricing foep 响应里的 offerIdentifier.sellerId,或 Seller Central 查看)
 
 import { AmzError } from '../../internal/errs/errors.js';
+import type { SpApiClient } from '../../internal/client/client.js';
+import type { Region } from '../../internal/client/regions.js';
 import type { ToolDefinition } from '../../tools/types.js';
 import { resolveMarketplace, strFlag, validateNumberFlag } from '../common.js';
 
-export function resolveSellerId(flags: Record<string, unknown>, region?: string): string {
+export async function resolveSellerId(
+  flags: Record<string, unknown>,
+  region: Region | undefined,
+  client?: SpApiClient,
+): Promise<string> {
   // sellerId 按区域可能不同(实测:NA 与 EU 是两个不同的编号),
-  // 优先级:--seller-id flag > SELLER_ID_<区域> > SELLER_ID(默认)
+  // 本地模式优先级:--seller-id flag > SELLER_ID_<区域> > SELLER_ID(默认)。
+  // Broker 模式必须以 Broker 按 STORE/region 返回的值为权威，防止令牌店铺与路径卖家不一致。
   const fromFlag = strFlag(flags, 'sellerId');
   const regionEnv = region ? process.env[`SELLER_ID_${region.toUpperCase()}`]?.trim() : undefined;
   const fromEnv = process.env['SELLER_ID']?.trim();
-  const sellerId = fromFlag ?? (regionEnv || undefined) ?? (fromEnv || undefined);
+  const brokerMode = Boolean(process.env['BROKER_URL']?.trim());
+  if (brokerMode && client) {
+    const brokerSellerId = await client.getSellerId(region);
+    if (!brokerSellerId) {
+      throw missingSellerIdError(true);
+    }
+    if (fromFlag && fromFlag !== brokerSellerId) {
+      throw new AmzError({
+        type: 'invalid_param',
+        subtype: 'broker.seller_id_mismatch',
+        param: '--seller-id',
+        hintAgent: 'report_to_human',
+        hintHuman:
+          `--seller-id 与 Broker 为当前店铺/区域返回的 Seller ID 不一致。` +
+          'CLI 已拒绝执行,请检查 --account、--marketplace 或联系管理员核对 Broker 配置。',
+        message: `explicit sellerId does not match Broker sellerId for region ${region ?? 'default'}`,
+      });
+    }
+    return brokerSellerId;
+  }
+
+  const configuredSellerId = fromFlag ?? (regionEnv || undefined) ?? (fromEnv || undefined);
+  const sellerId = configuredSellerId ?? (client ? await client.getSellerId(region) : undefined);
   if (!sellerId) {
-    throw new AmzError({
-      type: 'invalid_param',
-      subtype: 'missing_seller_id',
-      param: '--seller-id',
-      hintAgent: 'fix_param',
-      hintHuman:
-        '缺少卖家编号:请用 --seller-id 传入,或在 .env 里配置 SELLER_ID(多区域用 SELLER_ID_NA / SELLER_ID_EU)。' +
-        '(查看方式:Seller Central → 设置 → 账户信息 → 商户令牌 Merchant Token)',
-      message: 'sellerId is required (flag --seller-id or env SELLER_ID / SELLER_ID_<REGION>)',
-    });
+    throw missingSellerIdError(false);
   }
   return sellerId;
+}
+
+function missingSellerIdError(brokerMode: boolean): AmzError {
+  return new AmzError({
+    type: 'invalid_param',
+    subtype: 'missing_seller_id',
+    param: '--seller-id',
+    hintAgent: brokerMode ? 'report_to_human' : 'fix_param',
+    hintHuman:
+      (brokerMode
+        ? 'Broker 没有返回当前店铺/区域的卖家编号:请联系管理员配置 SELLER_ID_<店铺>_<区域>。'
+        : '缺少卖家编号:请用 --seller-id 传入,或在 .env 里配置 SELLER_ID(多区域用 SELLER_ID_NA / SELLER_ID_EU)。') +
+      '(查看方式:Seller Central → 设置 → 账户信息 → 商户令牌 Merchant Token)',
+    message: brokerMode
+      ? 'Broker did not return sellerId for the selected store and region'
+      : 'sellerId is required (flag --seller-id or env SELLER_ID / SELLER_ID_<REGION>)',
+  });
 }
 
 const SELLER_ID_FLAG = {
@@ -72,7 +109,7 @@ export const listingMine: ToolDefinition = {
   },
   execute: async (ctx) => {
     const mkt = resolveMarketplace(ctx.flags['marketplace']);
-    const sellerId = resolveSellerId(ctx.flags, mkt.region);
+    const sellerId = await resolveSellerId(ctx.flags, mkt.region, ctx.client);
     const skus = strFlag(ctx.flags, 'skus');
 
     ctx.progress(`· 正在列出本店铺在 ${mkt.country} 的 listing...`);
@@ -122,7 +159,7 @@ export const listingSku: ToolDefinition = {
   ],
   execute: async (ctx) => {
     const mkt = resolveMarketplace(ctx.flags['marketplace']);
-    const sellerId = resolveSellerId(ctx.flags, mkt.region);
+    const sellerId = await resolveSellerId(ctx.flags, mkt.region, ctx.client);
     const sku = strFlag(ctx.flags, 'sku')!;
     const include =
       strFlag(ctx.flags, 'include') ?? 'summaries,issues,offers,fulfillmentAvailability';
