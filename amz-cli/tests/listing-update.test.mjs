@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
 import { afterEach, test } from 'node:test';
 import { listingUpdate } from '../dist/shortcuts/listing/update.js';
+import { resolveSellerId } from '../dist/shortcuts/listing/mine.js';
 
 afterEach(() => {
   delete process.env.SELLER_ID;
+  delete process.env.SELLER_ID_NA;
   delete process.env.BROKER_URL;
   delete process.env.SP_API_SANDBOX;
 });
@@ -56,6 +58,87 @@ test('rejects unsupported operations, nested paths, and non-array values locally
     () => listingUpdate.validate(flags([{ op: 'replace', path: '/attributes/item_name', value: 'bad' }])),
     (error) => error?.subtype === 'invalid_patch_value',
   );
+});
+
+test('add, replace, and merge require value before any Amazon preview call', () => {
+  for (const [op, path] of [
+    ['add', '/attributes/item_name'],
+    ['replace', '/attributes/item_name'],
+    ['merge', '/attributes/fulfillment_availability'],
+  ]) {
+    assert.throws(
+      () => listingUpdate.validate(flags([{ op, path }])),
+      (error) => error?.subtype === 'missing_patch_value',
+      `${op} without value should be rejected`,
+    );
+  }
+});
+
+test('merge only accepts the two paths documented by Amazon', () => {
+  for (const path of [
+    '/attributes/fulfillment_availability',
+    '/attributes/purchasable_offer',
+  ]) {
+    assert.doesNotThrow(() =>
+      listingUpdate.validate(flags([{ op: 'merge', path, value: [{}] }])),
+    );
+  }
+  assert.throws(
+    () => listingUpdate.validate(flags([
+      { op: 'merge', path: '/attributes/item_name', value: [{ value: 'New name' }] },
+    ])),
+    (error) => error?.subtype === 'unsupported_merge_path',
+  );
+});
+
+test('delete remains schema-driven and is not forced to include value locally', () => {
+  assert.doesNotThrow(() =>
+    listingUpdate.validate(flags([{ op: 'delete', path: '/attributes/item_name' }])),
+  );
+});
+
+test('local mode keeps explicit and region Seller ID precedence without credential lookup', async () => {
+  process.env.SELLER_ID = 'DEFAULT_SELLER';
+  process.env.SELLER_ID_NA = 'REGION_SELLER';
+  let credentialLookups = 0;
+  const client = {
+    getSellerId: async () => {
+      credentialLookups += 1;
+      return 'SHOULD_NOT_BE_USED';
+    },
+  };
+  assert.equal(await resolveSellerId({}, 'na', client), 'REGION_SELLER');
+  assert.equal(await resolveSellerId({ sellerId: 'EXPLICIT_SELLER' }, 'na', client), 'EXPLICIT_SELLER');
+  assert.equal(credentialLookups, 0);
+});
+
+test('local mode missing Seller ID fails without requesting LWA credentials', async () => {
+  let credentialLookups = 0;
+  await assert.rejects(
+    () => resolveSellerId({}, 'na', {
+      getSellerId: async () => {
+        credentialLookups += 1;
+        return undefined;
+      },
+    }),
+    (error) => error?.subtype === 'missing_seller_id',
+  );
+  assert.equal(credentialLookups, 0);
+});
+
+test('Broker Seller ID remains authoritative and explicit flag is not a fallback', async () => {
+  process.env.BROKER_URL = 'https://broker.example.test';
+  let brokerLookups = 0;
+  await assert.rejects(
+    () => resolveSellerId({ sellerId: 'EXPLICIT_SELLER' }, 'na', {
+      getSellerId: async () => {
+        brokerLookups += 1;
+        return undefined;
+      },
+    }),
+    (error) => error?.subtype === 'missing_seller_id',
+  );
+  assert.equal(brokerLookups, 1);
 });
 
 test('INVALID validation preview fails before the framework can issue a token', async () => {

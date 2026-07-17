@@ -27,6 +27,19 @@ refresh_token(规格 §5.1)。
 | `ADS_CLIENT_SECRET` | 广告应用 client_secret | |
 | `RT_ADS_<店铺>` | 各店铺广告 refresh_token | `RT_ADS_SHOP_A=Atzr\|yyy` |
 
+### Listing 升级部署顺序
+
+Broker 返回的 Seller ID 与同一次颁发的店铺/区域 access token 共同构成 Listing 身份。CLI 在 Broker 模式下不会接受本地 `.env` 或 `--seller-id` 作为缺失配置的兜底；显式 `--seller-id` 只用于检测身份是否一致。
+
+因此升级顺序必须是：
+
+1. 为 `TEAM_ACCESS` 已授权的每个 `店铺 × SP-API 区域` 配齐 `SELLER_ID_<店铺>_<区域>`。
+2. 先部署并验证新版 Broker。
+3. 对每个组合执行一次只读 `listing mine` 或 `listing sku` 冒烟测试。
+4. 再让同事更新 CLI。
+
+缺少某个组合只会影响需要 Seller ID 的 `listing mine/sku/schema/update`；公开目录的 `listing search/get` 不受影响。
+
 团队令牌自己生成即可(推荐 PowerShell:
 `-join ((1..32) | %% { '{0:x}' -f (Get-Random -Max 16) })`,
 或任何 32+ 位随机字符串)。

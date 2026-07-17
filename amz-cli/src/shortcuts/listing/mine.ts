@@ -49,8 +49,9 @@ export async function resolveSellerId(
     return brokerSellerId;
   }
 
-  const configuredSellerId = fromFlag ?? (regionEnv || undefined) ?? (fromEnv || undefined);
-  const sellerId = configuredSellerId ?? (client ? await client.getSellerId(region) : undefined);
+  // 本地凭证不会携带 Seller ID；缺少显式配置时应立即报错，不能为一个
+  // 注定取不到的值先换发 LWA token，否则会掩盖真正的配置问题。
+  const sellerId = fromFlag ?? (regionEnv || undefined) ?? (fromEnv || undefined);
   if (!sellerId) {
     throw missingSellerIdError(false);
   }
@@ -76,7 +77,7 @@ function missingSellerIdError(brokerMode: boolean): AmzError {
 
 const SELLER_ID_FLAG = {
   name: 'seller-id',
-  desc: '卖家编号(可省略,默认读 .env 的 SELLER_ID)',
+  desc: '卖家编号(本地模式可省略并读 SELLER_ID;Broker 模式仅用于与服务端返回值核对,不能兜底)',
 };
 
 const LISTINGS_INCLUDED_DATA = [

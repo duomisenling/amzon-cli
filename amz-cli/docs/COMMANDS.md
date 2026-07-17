@@ -52,7 +52,7 @@ amz-cli inventory list --marketplace US
 **多账号(店铺)**:所有命令支持全局 `--account <名称>` 切换账号:
 - 本地模式:凭证读 `~/.amz-cli/accounts/<名称>.env`(格式同 `.env.example`,每个店铺一份);
 - Broker 模式:直接切换店铺代号,权限由 Broker 端的 TEAM_ACCESS 策略控制;
-- Broker 的 Listing 命令还要求管理员在服务端配置对应的 `SELLER_ID_<店铺>_<区域>`;
+- Broker 的 `listing mine/sku/schema/update` 要求管理员在服务端配置对应的 `SELLER_ID_<店铺>_<区域>`。Broker 返回值是权威身份；命令行 `--seller-id` 只能核对是否一致，不能在服务端缺配置时兜底。部署时必须先配置并发布 Broker，再让同事更新 CLI;
 - 不传 `--account` = 用项目目录的默认 `.env`,行为与从前完全一致;
 - 账号不存在会**明确报错**,绝不会静默用默认凭证冒充所选账号。
 
@@ -198,7 +198,7 @@ amz-cli listing mine --marketplace US
 amz-cli listing mine --marketplace US --with-issue-severity ERROR
 ```
 
-需要卖家编号:在 `.env` 配置 `SELLER_ID=...`(或每次传 `--seller-id`)。
+需要卖家编号。本地凭证模式在 `.env` 配置 `SELLER_ID=...`(或每次传 `--seller-id`)；Broker 模式必须由管理员配置服务端 `SELLER_ID_<店铺>_<区域>`，本地 flag/env 不作为兜底。
 
 ### listing sku — 自己单个 SKU 详情
 
@@ -242,6 +242,12 @@ amz-cli listing update ... --confirm --preview-token <preview_token>
 ```
 
 `--product-type` 用 `listing sku --include productTypes` 查;`--patches` 是 JSON Patch 格式(让 Agent 帮你拼,人只负责核对预览)。
+
+Patch 本地规则：
+
+- `add`、`replace`、`merge` 必须提供对象数组 `value`；缺少时不会调用 Amazon。
+- `merge` 按 Amazon 当前官方能力只允许 `/attributes/fulfillment_availability` 和 `/attributes/purchasable_offer`；其他属性请使用 schema 支持的 `add`/`replace`，并走官方 `VALIDATION_PREVIEW`。
+- `delete` 是否需要带选择器 `value` 取决于属性 schema；CLI 不一刀切，由当前产品类型 schema 和官方预览判断。
 
 遇到预览错误时，以本次响应的 `issues` 和当前 schema 为准：
 - **8560** 可能与商品身份信息不足有关，但不能无条件添加 `merchant_suggested_asin`。只有当前 schema 确实包含该字段、ASIN 已核对且 issues 指向此类缺失时，才按 schema 结构补充后重新预览；

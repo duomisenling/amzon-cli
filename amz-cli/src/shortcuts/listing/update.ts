@@ -29,6 +29,11 @@ interface JsonPatch {
 }
 
 const PATCH_OPS = new Set<JsonPatch['op']>(['add', 'replace', 'merge', 'delete']);
+const PATCH_OPS_REQUIRING_VALUE = new Set<JsonPatch['op']>(['add', 'replace', 'merge']);
+const MERGE_PATHS = new Set([
+  '/attributes/fulfillment_availability',
+  '/attributes/purchasable_offer',
+]);
 
 function parsePatches(flags: Record<string, unknown>): JsonPatch[] {
   let raw = strFlag(flags, 'patches');
@@ -115,6 +120,28 @@ function parsePatches(flags: Record<string, unknown>): JsonPatch[] {
           `第 ${index + 1} 个 patch 的 path 无效。Listings Items API 只能修改顶层属性,` +
           '格式必须是 /attributes/<字段名>,不能继续写嵌套路径。',
         message: `patch path at item ${index + 1} must target one top-level attribute: ${JSON.stringify(p.path)}`,
+      });
+    }
+    if (PATCH_OPS_REQUIRING_VALUE.has(p.op as JsonPatch['op']) && !('value' in p)) {
+      throw new AmzError({
+        type: 'invalid_param',
+        subtype: 'missing_patch_value',
+        param: '--patches',
+        hintAgent: 'fix_param',
+        hintHuman: `第 ${index + 1} 个 patch 使用 ${String(p.op)} 操作时必须提供 value。`,
+        message: `patch value is required for ${String(p.op)} at item ${index + 1}`,
+      });
+    }
+    if (p.op === 'merge' && !MERGE_PATHS.has(p.path as string)) {
+      throw new AmzError({
+        type: 'invalid_param',
+        subtype: 'unsupported_merge_path',
+        param: '--patches',
+        hintAgent: 'fix_param',
+        hintHuman:
+          `第 ${index + 1} 个 patch 的 merge 路径不受 Amazon 支持。` +
+          '当前只能用于 /attributes/fulfillment_availability 或 /attributes/purchasable_offer。',
+        message: `merge is not supported for path at item ${index + 1}: ${JSON.stringify(p.path)}`,
       });
     }
     if (
@@ -219,7 +246,10 @@ export const listingUpdate: ToolDefinition = {
   flags: [
     { name: 'marketplace', desc: '市场,国家码如 US / CA / MX(必填)', required: true },
     { name: 'sku', desc: '本店铺要修改的 SKU(必填)', required: true },
-    { name: 'seller-id', desc: '卖家编号(可省略,默认读 .env 的 SELLER_ID)' },
+    {
+      name: 'seller-id',
+      desc: '卖家编号(本地模式可省略并读 SELLER_ID;Broker 模式仅用于核对服务端返回值,不能兜底)',
+    },
     {
       name: 'product-type',
       desc: '亚马逊产品类型(必填;可先用 listing sku --include productTypes 查到)',

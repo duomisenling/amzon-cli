@@ -95,7 +95,10 @@ export const listingSchema: ToolDefinition = {
       desc: '产品类型名(必填;用 listing sku --include productTypes 查某 SKU 的类型)',
       required: true,
     },
-    { name: 'seller-id', desc: '卖家编号(可省略,默认读 .env 的 SELLER_ID;传了才返回卖家专属 schema)' },
+    {
+      name: 'seller-id',
+      desc: '卖家编号(本地模式可省略并读 SELLER_ID;Broker 模式仅用于核对服务端返回值,不能兜底)',
+    },
     {
       name: 'requirements-enforced',
       desc: '必填约束模式:局部改字段用 NOT_ENFORCED(默认),检查完整提交用 ENFORCED',

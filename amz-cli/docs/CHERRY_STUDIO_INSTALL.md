@@ -75,6 +75,7 @@ SP_API_REGION=na
 - `.env` 不能发送到聊天、邮件或 GitHub。
 - 每位同事应使用独立 `TEAM_TOKEN`，方便吊销和审计。
 - `STORE`、API 和区域是否可用，由 Broker 的 `TEAM_ACCESS` 决定。
+- `listing mine/sku/schema/update` 还要求管理员在 Broker 为对应店铺和区域配置 Seller ID。Broker 返回值是权威身份，`--seller-id` 不能作为缺失配置的兜底；管理员必须先部署并验证 Broker，再通知同事更新 CLI。
 - 同事版不要填写 `LWA_REFRESH_TOKEN`、`LWA_CLIENT_SECRET`、`ADS_REFRESH_TOKEN`。
 
 ## 四、接入现有 Cherry Studio Agent

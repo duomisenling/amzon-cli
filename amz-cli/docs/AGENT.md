@@ -97,7 +97,7 @@ node dist/cli.js <域> <命令> [参数]
 - `--marketplace` 用国家码:US/CA/MX/BR/UK/DE/FR/IT/ES。**查欧洲站点直接用(如 `--marketplace DE`),系统自动切区域**。
 - **欧洲广告**:凭证通用但要加 `--region eu`,且必须用欧洲的 profileId(用 `ads profiles --region eu` 查)。
 - 广告 profileId 属于具体账户运行信息，不写入 Skill 或聊天记录。需要时用 `ads profiles`（北美）或 `ads profiles --region eu`（欧洲）实时查询，再使用对应区域返回的 ID。
-- 卖家编号(sellerId)已在环境配置中,不用传。
+- 卖家编号(sellerId)：本地模式可来自 `--seller-id`/环境配置；Broker 模式必须使用 Broker 返回的店铺/区域 Seller ID，flag 只能核对、不能兜底。出现 `missing_seller_id` 时联系管理员补 Broker 配置，不得引导用户绕过。
 - 复杂 JSON 参数(如 listing update 的 --patches)写入临时文件,用 `--patches @文件路径` 传,避免命令行引号问题。
 - `--timeout` 单位是分钟，只接受 1–60 的有限数字；不要传 `Infinity`、`NaN`、0 或超过 60 的值。
 - `orders items`、`shipments list/items`、`ads campaigns/keywords` 返回 `nextToken` 时，使用相同命令加 `--next-token <值>` 继续取下一页，不得把第一页当成全部数据。
@@ -123,6 +123,8 @@ node dist/cli.js <域> <命令> [参数]
 **改价决策**:`pricing foep`(Buy Box 预期价)→ `fees estimate --price <目标价>`(算完还赚不赚)→ 用户拍板 → `listing update --dry-run` → 带预览令牌的 confirm 命令交给用户。
 
 **改 listing 字段(标题/五点/亮点/图片等)**:先 `listing sku --include productTypes` 拿产品类型 → `listing schema --product-type <类型>` 或 `--attribute <字段>` 拿到该店铺、该市场、该产品类型的字段确切名字和结构(不要凭空拼 patch)→ 照 schema 拼 `--patches` → `listing update --dry-run`(走亚马逊官方 VALIDATION_PREVIEW,`status=VALID` 且无 ERROR issue 才算通过;ACCEPTED 是正式提交状态)→ 带预览令牌的 confirm 命令交给用户。商品亮点等新字段按市场和产品类型逐步开放,只有本次 schema 实际返回的字段才能用,不得把一个类型的字段名硬编码给其他类型。
+
+Patch 规则：`add`/`replace`/`merge` 必须带对象数组 `value`；`merge` 只用于 `/attributes/fulfillment_availability` 或 `/attributes/purchasable_offer`。其他字段不得使用 `merge`；删除实例需要的选择器以当前 schema 和官方预览为准。
 
 ## 回答风格
 
