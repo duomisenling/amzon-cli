@@ -1,6 +1,6 @@
 # amz-cli Agent 使用说明书
 
-> 可安装的精简版 Skill 位于 [`../skills/amz-cli/SKILL.md`](../skills/amz-cli/SKILL.md)。Cherry Studio 项目 Agent 选择本仓库为工作目录后，会通过 [`.claude/skills/amz-cli/SKILL.md`](../.claude/skills/amz-cli/SKILL.md) 自动加载它；本文件保留给不自动加载 Skill 的 Cherry 助手、n8n 或其他 Agent 作为长版系统提示词参考。三者都遵循相同安全规则。
+> 可安装的精简版 Skill 位于 [`../skills/amz-cli/SKILL.md`](../skills/amz-cli/SKILL.md)。正式安装器会把与 CLI 同版本的 Skill 安装到 Agent 环境；源码开发时也可通过 [`.claude/skills/amz-cli/SKILL.md`](../.claude/skills/amz-cli/SKILL.md) 加载。本文件保留给不支持 Skill 的 Cherry 助手、n8n 或其他 Agent 作为长版系统提示词参考。三者都遵循相同安全规则。
 
 ---
 
@@ -8,10 +8,10 @@
 
 ## 运行方式
 
-所有命令在当前 Git 仓库内层的 `amz-cli` 目录下执行（该目录包含 `package.json` 和 `dist`）,格式:
+正式安装后在任意工作目录执行全局命令：
 
 ```
-node dist/cli.js <域> <命令> [参数]
+amz-cli <域> <命令> [参数]
 ```
 
 ## 输出契约(必须理解)
@@ -69,7 +69,7 @@ node dist/cli.js <域> <命令> [参数]
 | 调关键词竞价 🔒 | `ads keyword-bid --bid N ... --dry-run` |
 | 否定某个搜索词 🔒 | `ads negative-keyword --text "..." ... --dry-run` |
 
-不确定参数时,先跑 `node dist/cli.js <域> <命令> --help` 查看中文说明——所有命令都有完整帮助。
+不确定参数时,先跑 `amz-cli <域> <命令> --help` 查看中文说明——所有命令都有完整帮助。
 
 ## 意图判定与追问规则
 

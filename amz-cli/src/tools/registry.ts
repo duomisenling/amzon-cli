@@ -210,9 +210,9 @@ async function runTool(tool: ToolDefinition, flags: Record<string, unknown>): Pr
         hintAgent: 'report_to_human',
         hintHuman:
           '开发模式(用 tsx 直接跑源码)下,交互确认可能失效,已禁止执行写操作。' +
-          '请用编译版:先 npm run build,再用 node dist/cli.js ... 执行(同事使用的正式版就是这样运行的)。',
+          '请使用正式安装的 amz-cli 命令；源码开发者先 npm run build，再用 node dist/cli.js ... 执行。',
         message:
-          'write execution forbidden in tsx dev mode: interactive confirmation is unreliable there; use the compiled build (node dist/cli.js)',
+          'write execution forbidden in tsx dev mode: interactive confirmation is unreliable there; use the installed amz-cli command or compiled dist/cli.js',
       });
     }
 

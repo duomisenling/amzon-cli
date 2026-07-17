@@ -53,17 +53,39 @@ export function extractAccountArg(argv: string[]): string | undefined {
   return undefined;
 }
 
-/** 加载 cwd 的默认 .env；已有 shell 环境值优先。 */
-export function loadDotEnvIfPresent(env: Env = process.env, cwd = process.cwd()): void {
+/**
+ * 加载默认凭证；已有 shell 环境值优先。
+ *
+ * 兼容旧版：cwd/.env 中出现任一 amz-cli 配置键时，整份文件作为当前项目配置。
+ * 全局安装：cwd 没有 amz-cli 配置时，回退到 ~/.amz-cli/.env。
+ * 两份文件绝不混合，避免本地店铺凭证与用户目录中的 Broker/其他店铺身份串用。
+ */
+export function loadDotEnvIfPresent(
+  env: Env = process.env,
+  cwd: string = process.cwd(),
+  home: string = homedir(),
+): void {
   if ((env['AMZ_CLI_SKIP_DOTENV'] ?? '').trim().toLowerCase() === 'true') return;
-  try {
-    const vars = parseEnvText(readFileSync(join(cwd, '.env'), 'utf8'));
-    for (const [key, value] of Object.entries(vars)) {
-      if (!(key in env)) env[key] = value;
-    }
-  } catch {
-    // 没有 .env 是正常情况(Broker 系统环境变量/CI)。
+
+  const projectVars = readEnvFile(join(cwd, '.env'));
+  const userVars = readEnvFile(join(home, '.amz-cli', '.env'));
+  const selected = Object.keys(projectVars).some(isAmzCliConfigKey) ? projectVars : userVars;
+  for (const [key, value] of Object.entries(selected)) {
+    if (!(key in env)) env[key] = value;
   }
+}
+
+function readEnvFile(path: string): Record<string, string> {
+  try {
+    return parseEnvText(readFileSync(path, 'utf8'));
+  } catch {
+    // 没有配置文件是正常情况(Broker 系统环境变量/CI)。
+    return {};
+  }
+}
+
+function isAmzCliConfigKey(key: string): boolean {
+  return /^(?:LWA_|ADS_|SELLER_ID(?:_|$)|BROKER_URL$|TEAM_TOKEN$|STORE$|SP_API_)/.test(key);
 }
 
 /**

@@ -6,8 +6,10 @@
 
 import { Command } from 'commander';
 import { printError } from './internal/errs/output.js';
+import { readPackageInfo } from './internal/package-info.js';
 import { isSandboxMode } from './internal/client/regions.js';
 import { extractAccountArg, loadAccount, loadDotEnvIfPresent } from './internal/account.js';
+import { registerSetupCommands } from './setup/commands.js';
 import { registerTools } from './tools/registry.js';
 import { authWhoami } from './shortcuts/auth/whoami.js';
 import { listingSearch } from './shortcuts/listing/catalog-search.js';
@@ -44,6 +46,7 @@ import { feesEstimate } from './shortcuts/fees/estimate.js';
 import { shipmentsList, shipmentsItems } from './shortcuts/shipments/list.js';
 
 async function main(): Promise<void> {
+  const packageInfo = readPackageInfo();
   // 先加载共享 .env 以识别 Broker，再让显式账号完整覆盖/隔离店铺凭证。
   loadDotEnvIfPresent();
   const account = extractAccountArg(process.argv);
@@ -58,12 +61,14 @@ async function main(): Promise<void> {
   program
     .name('amz-cli')
     .description('Amazon SP-API CLI for AI Agents — 给 Agent 用的亚马逊命令行工具')
-    .version('0.1.0')
+    .version(packageInfo.version)
     // 仅用于 --help 展示;实际解析在 extractAccountArg(任意位置可写,先于 commander 处理)
     .option(
       '--account <名称>',
       '多账号:用指定账号的凭证执行(本地=~/.amz-cli/accounts/<名称>.env;Broker=切换店铺)。省略则用默认 .env',
     );
+
+  registerSetupCommands(program, packageInfo);
 
   // 所有功能定义在这里挂载(一个功能 = shortcuts/ 下一个 ToolDefinition)
   registerTools(program, [

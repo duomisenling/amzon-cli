@@ -43,6 +43,72 @@ test('loads shared Broker settings before switching STORE', () => {
   assert.equal(env.SELLER_ID, undefined);
 });
 
+test('falls back to the user config when cwd has no amz-cli settings', () => {
+  const cwd = tempRoot();
+  const home = tempRoot();
+  mkdirSync(join(home, '.amz-cli'), { recursive: true });
+  writeFileSync(
+    join(home, '.amz-cli', '.env'),
+    'LWA_CLIENT_ID=user-client\nLWA_REFRESH_TOKEN_NA=user-token\nSELLER_ID_NA=USER_SELLER\n',
+  );
+  writeFileSync(join(cwd, '.env'), 'UNRELATED_SETTING=keep-this-project-only\n');
+
+  const env = {};
+  loadDotEnvIfPresent(env, cwd, home);
+
+  assert.equal(env.LWA_CLIENT_ID, 'user-client');
+  assert.equal(env.LWA_REFRESH_TOKEN_NA, 'user-token');
+  assert.equal(env.SELLER_ID_NA, 'USER_SELLER');
+  assert.equal(env.UNRELATED_SETTING, undefined);
+});
+
+test('project amz-cli config is isolated and never inherits missing identity from user config', () => {
+  const cwd = tempRoot();
+  const home = tempRoot();
+  mkdirSync(join(home, '.amz-cli'), { recursive: true });
+  writeFileSync(
+    join(home, '.amz-cli', '.env'),
+    'BROKER_URL=https://broker.example.test\nTEAM_TOKEN=user-team\nSTORE=USER_STORE\n',
+  );
+  writeFileSync(
+    join(cwd, '.env'),
+    'LWA_CLIENT_ID=project-client\nLWA_REFRESH_TOKEN_NA=project-token\n',
+  );
+
+  const env = {};
+  loadDotEnvIfPresent(env, cwd, home);
+
+  assert.equal(env.LWA_CLIENT_ID, 'project-client');
+  assert.equal(env.LWA_REFRESH_TOKEN_NA, 'project-token');
+  assert.equal(env.BROKER_URL, undefined);
+  assert.equal(env.TEAM_TOKEN, undefined);
+  assert.equal(env.STORE, undefined);
+});
+
+test('shell environment overrides the selected dotenv file', () => {
+  const cwd = tempRoot();
+  const home = tempRoot();
+  mkdirSync(join(home, '.amz-cli'), { recursive: true });
+  writeFileSync(join(home, '.amz-cli', '.env'), 'SP_API_REGION=eu\nSELLER_ID_EU=FILE_SELLER\n');
+
+  const env = { SP_API_REGION: 'na' };
+  loadDotEnvIfPresent(env, cwd, home);
+
+  assert.equal(env.SP_API_REGION, 'na');
+  assert.equal(env.SELLER_ID_EU, 'FILE_SELLER');
+});
+
+test('AMZ_CLI_SKIP_DOTENV disables both project and user config loading', () => {
+  const cwd = tempRoot();
+  const home = tempRoot();
+  mkdirSync(join(home, '.amz-cli'), { recursive: true });
+  writeFileSync(join(home, '.amz-cli', '.env'), 'LWA_CLIENT_ID=should-not-load\n');
+
+  const env = { AMZ_CLI_SKIP_DOTENV: 'true' };
+  loadDotEnvIfPresent(env, cwd, home);
+  assert.equal(env.LWA_CLIENT_ID, undefined);
+});
+
 test('a local account cannot inherit another account region tokens or Seller IDs', () => {
   const home = tempRoot();
   const accountDir = join(home, '.amz-cli', 'accounts');

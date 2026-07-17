@@ -2,8 +2,8 @@
 
 给运营同事和 AI Agent 看的完整命令说明。所有命令的输出都是 JSON(stdout),进度和错误在另一个通道(stderr),Agent 和自动化脚本可以放心解析。
 
-> 开发阶段运行方式:`npx tsx src/cli.ts <命令>`(在项目目录下)。
-> Cherry Studio 与正式使用统一运行编译版:`node dist/cli.js <命令>`。下文为简洁统一用 `amz-cli` 代称。
+> 正式安装与 Cherry Studio 统一运行全局编译版：`amz-cli <命令>`。
+> 源码开发可用 `npx tsx src/cli.ts <命令>`；真实写执行必须改用已安装的 `amz-cli`，或先构建后运行 `node dist/cli.js`。
 > 首次安装与更新见 [Cherry Studio 安装指南](CHERRY_STUDIO_INSTALL.md)。
 
 ---
@@ -33,6 +33,10 @@
 ## 快速开始
 
 ```powershell
+# 0. 安装器与配置位置（安装详情见 Cherry 指南）
+npx amz-cli@latest install
+amz-cli config path
+
 # 1. 验证凭证是否配置正确(第一条命令永远跑这个)
 amz-cli auth whoami
 
@@ -41,6 +45,14 @@ amz-cli sales stats --marketplace US --days 7 --granularity Total
 
 # 3. 看看 FBA 库存还剩多少
 amz-cli inventory list --marketplace US
+```
+
+安装管理命令不会调用 Amazon API：
+
+```powershell
+amz-cli install --dry-run  # 仅显示当前版本的全局安装计划
+amz-cli config path        # 显示 ~/.amz-cli/.env 的实际路径
+amz-cli config init        # 首次创建空白模板；已有配置绝不覆盖
 ```
 
 ## 基础概念(先读这个)
@@ -53,7 +65,7 @@ amz-cli inventory list --marketplace US
 - 本地模式:凭证读 `~/.amz-cli/accounts/<名称>.env`(格式同 `.env.example`,每个店铺一份);
 - Broker 模式:直接切换店铺代号,权限由 Broker 端的 TEAM_ACCESS 策略控制;
 - Broker 的 `listing mine/sku/schema/update` 要求管理员在服务端配置对应的 `SELLER_ID_<店铺>_<区域>`。Broker 返回值是权威身份；命令行 `--seller-id` 只能核对是否一致，不能在服务端缺配置时兜底。部署时必须先配置并发布 Broker，再让同事更新 CLI;
-- 不传 `--account` = 用项目目录的默认 `.env`,行为与从前完全一致;
+- 不传 `--account` = 优先用当前项目的 amz-cli `.env`；没有时回退到 `~/.amz-cli/.env`;
 - 账号不存在会**明确报错**,绝不会静默用默认凭证冒充所选账号。
 
 ```powershell
@@ -508,9 +520,9 @@ amz-cli ads test-account-status
 
 ## 写操作怎么执行(必读)
 
-> ⚠️ **写操作只能用编译版执行**:先 `npm run build`,再用 `node dist/cli.js ...`。
+> ⚠️ **写操作只能用编译版执行**：正式使用 `amz-cli ...`；源码开发者先 `npm run build`，再用 `node dist/cli.js ...`。
 > 开发用的 `npx tsx src/cli.ts` 会吞掉终端确认输入、让门槛失效,所以 CLI **主动禁止**在这种模式下执行写操作(会报 `dev_mode_write_forbidden`)。
-> 同事按安装指南使用 `node dist/cli.js` 运行编译版；这条只影响开发者本机直接运行源码。
+> 同事按安装指南使用全局 `amz-cli`；这条只影响开发者本机直接运行源码。
 
 所有 🔒 写操作遵循同一个铁律,**任何一步都不能跳过**:
 

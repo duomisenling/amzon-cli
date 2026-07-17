@@ -2,36 +2,56 @@
 
 给 AI Agent 用的亚马逊 SP-API 命令行工具(9 人运营团队内部使用)。
 
-**📖 完整命令使用手册:[docs/COMMANDS.md](docs/COMMANDS.md)**(41 条命令的示例、参数、注意事项,给运营同事和 Agent 看)
+**📖 完整命令使用手册:[docs/COMMANDS.md](docs/COMMANDS.md)**（命令示例、参数和注意事项，给运营同事与 Agent 使用）
 
 **🍒 Cherry Studio 安装与更新:[docs/CHERRY_STUDIO_INSTALL.md](docs/CHERRY_STUDIO_INSTALL.md)**
 
 架构参照飞书官方 [lark-cli](https://github.com/larksuite/cli) 的三层命令与错误契约设计。
 
-## 开发环境运行
+## 快速安装
 
 要求 Node.js ≥ 20。
 
 ```powershell
-cd <仓库目录>\amz-cli
-npm ci
-copy .env.example .env      # 填入 LWA 凭证(见 .env.example 内注释)
-npm run dev -- auth whoami  # 验证凭证链路
+npx amz-cli@latest install --dry-run  # 可选：先看安装计划，不改系统
+npx amz-cli@latest install
+amz-cli --version
+amz-cli config path
 ```
+
+安装器会锁定同一个 npm 版本，同时安装全局 `amz-cli` / `amz-cli-mcp` 命令和 Agent Skill，并在首次安装时创建不含真实凭证的 `~/.amz-cli/.env` 模板；已有配置绝不覆盖。首次 npm 版本发布前若返回 404，请暂时使用下方“源码开发与应急安装”。
+
+完整的 Cherry Studio、凭证、测试和更新步骤见[安装指南](docs/CHERRY_STUDIO_INSTALL.md)。
 
 ## AI Agent Skill
 
 仓库内置可安装的 Agent Skill：[`skills/amz-cli/SKILL.md`](skills/amz-cli/SKILL.md)。它提供命令地图、`--help` 自查、JSON 错误处理和写操作安全规则，不重复展开全部命令。
 
-在 Cherry Studio 的项目 Agent 中，必须选择 Git 仓库内层的 `amz-cli` 目录作为工作目录，即同时包含 `package.json`、`dist` 和 `.claude` 的目录。Cherry 会从 [`.claude/skills/amz-cli/SKILL.md`](.claude/skills/amz-cli/SKILL.md) 发现项目 Skill，因此不需要手动粘贴系统提示词。完整步骤见[安装指南](docs/CHERRY_STUDIO_INSTALL.md)。
+正式安装器从 npm 全局包中安装同版本 Skill，避免 CLI 与操作说明漂移。Cherry Studio 中无需粘贴整份系统提示词；在 Agent 的“技能”页面确认 `amz-cli` 已启用，然后新开会话即可。
 
-发布到 GitHub 后，支持通用 Skills 安装器的 Agent 可按下面方式安装：
+源码开发者也可以从仓库安装 Skill：
 
 ```powershell
-npx skills add https://github.com/duomisenling/amzon-cli/tree/main/amz-cli/skills/amz-cli
+$skillPath = (Resolve-Path .\skills\amz-cli).Path
+npx skills add $skillPath -y -g
 ```
 
 其他不自动发现项目 Skills 的环境，仍可把 [`docs/AGENT.md`](docs/AGENT.md) 作为系统提示词参考。
+
+## 源码开发与应急安装
+
+```powershell
+git clone https://github.com/duomisenling/amzon-cli.git
+cd amzon-cli\amz-cli
+npm ci
+npm run build
+npm link
+$skillPath = (Resolve-Path .\skills\amz-cli).Path
+npx skills add $skillPath -y -g
+amz-cli --help
+```
+
+源码开发可继续使用 `npm run dev -- ...`；真实写执行必须使用全局编译版 `amz-cli`，或先构建后运行 `node dist/cli.js`。
 
 ## 目录结构
 
@@ -69,6 +89,6 @@ src/
 
 ## 安全
 
-- 凭证只放 `.env`(已被 .gitignore 忽略)或已实现的 Token Broker,绝不写进代码
+- 凭证只放项目 `.env`、用户目录 `~/.amz-cli/.env` 或 Token Broker，绝不写进代码；这些真实凭证文件都不得提交
 - access_token 只存进程内存,不落盘
-- 运营同事的电脑上不允许出现 refresh_token(部署阶段走 broker 模式)
+- 长期多人部署优先走 Broker；本地 refresh token 只用于经过授权的可信电脑和小范围试用
