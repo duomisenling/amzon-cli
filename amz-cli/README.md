@@ -23,15 +23,13 @@ npm run dev -- auth whoami  # 验证凭证链路
 
 仓库内置可安装的 Agent Skill：[`skills/amz-cli/SKILL.md`](skills/amz-cli/SKILL.md)。它提供命令地图、`--help` 自查、JSON 错误处理和写操作安全规则，不重复展开全部命令。
 
-在 Cherry Studio 中，CLI 与 Skill 必须分别安装。Cherry 需要访问 Git 仓库内层的 `amz-cli` 目录（同时包含 `package.json` 和 `dist`）；AI Skill 则按飞书 CLI 相同方式用 `npx skills add` 安装。已有 Agent 的当前工作目录在其他项目时，还要在该工作目录做一次项目级安装，让 `.claude/skills/amz-cli` 被当前会话发现。完整步骤见[安装指南](docs/CHERRY_STUDIO_INSTALL.md)。
+在 Cherry Studio 的项目 Agent 中，必须选择 Git 仓库内层的 `amz-cli` 目录作为工作目录，即同时包含 `package.json`、`dist` 和 `.claude` 的目录。Cherry 会从 [`.claude/skills/amz-cli/SKILL.md`](.claude/skills/amz-cli/SKILL.md) 发现项目 Skill，因此不需要手动粘贴系统提示词。完整步骤见[安装指南](docs/CHERRY_STUDIO_INSTALL.md)。
 
 发布到 GitHub 后，支持通用 Skills 安装器的 Agent 可按下面方式安装：
 
 ```powershell
-npx skills add https://github.com/duomisenling/amzon-cli/tree/main/amz-cli/skills/amz-cli -y -g
+npx skills add https://github.com/duomisenling/amzon-cli/tree/main/amz-cli/skills/amz-cli
 ```
-
-确认安装：`npx skills ls -g` 的输出中应出现 `amz-cli`。
 
 其他不自动发现项目 Skills 的环境，仍可把 [`docs/AGENT.md`](docs/AGENT.md) 作为系统提示词参考。
 
