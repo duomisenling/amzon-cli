@@ -1,6 +1,6 @@
 # Cherry Studio Agent 安装与更新指南
 
-本指南适合在 Windows 上把 amz-cli 接入 Cherry Studio。无需新建 Agent：已有 Agent 也可以直接添加本项目工作目录。
+本指南适合在 Windows 上把 amz-cli 接入 Cherry Studio。无需新建 Agent：已有 Agent 也可以直接添加本项目工作目录。和飞书官方 `lark-cli` 一样，**CLI 程序与 AI Skill 是两个独立安装步骤，缺一不可**。
 
 ## 一、安装前准备
 
@@ -21,7 +21,7 @@ npm --version
 
 `node --version` 必须是 `v20` 或更高。
 
-## 二、从 GitHub 安装
+## 二、从 GitHub 安装 CLI 与 Skill
 
 建议安装到固定目录，例如 `C:\Tools`：
 
@@ -36,6 +36,15 @@ node dist\cli.js --help
 
 最后一条命令显示 `auth / listing / orders / sales / ads` 等命令组，即表示程序构建成功。
 
+然后单独安装 AI Skill。此步骤是必需的，直接采用飞书 CLI 的 `npx skills add ... -y -g` 安装方式：
+
+```powershell
+npx skills add https://github.com/duomisenling/amzon-cli/tree/main/amz-cli/skills/amz-cli -y -g
+npx skills ls -g
+```
+
+第二条命令的输出中必须出现 `amz-cli`。CLI 构建成功只代表命令可以运行；如果跳过 Skill 安装，Cherry Studio 不会知道什么时候、怎样以及按什么安全规则调用它。
+
 - 公开仓库：同事不需要 GitHub 账号即可克隆和更新。
 - 私有仓库：每位同事都必须获得仓库权限并完成 GitHub 登录，否则无法拉取。
 - 不推荐下载 ZIP 作为日常安装方式；ZIP 能运行，但以后无法用 `git pull` 增量更新。
@@ -45,7 +54,7 @@ node dist\cli.js --help
 ```text
 C:\Tools\amzon-cli\          ← Git 仓库外层，不要选作 Cherry 工作目录
 ├─ amz-broker\
-└─ amz-cli\                  ← CLI 项目，也是 Cherry 工作目录
+└─ amz-cli\                  ← CLI 项目，也是 Cherry 需要访问的工作目录
    ├─ dist\
    ├─ .claude\skills\amz-cli\SKILL.md
    └─ package.json
@@ -89,15 +98,29 @@ SP_API_REGION=na
    ```
 
 4. 在“工具”或“权限模式”中，允许 Agent 读取项目文件并执行终端/Bash 命令。
-5. 保存配置，建议新开一个会话，让工作目录和 Skill 清单重新加载。
+5. 保存配置，新开一个会话，让工作目录和 Skill 清单重新加载。
 
-Cherry Studio 会扫描工作目录中的：
+### 已有 Agent 的当前工作目录还在其他项目时
+
+Cherry Studio 主要从**当前会话的工作目录**发现项目级 Skill。只把 `C:\Tools\amzon-cli\amz-cli` 添加为另一个工作目录，并不能保证当前项目会话加载其中的 `.claude\skills`。
+
+全局安装后先新开会话测试。如果 `npx skills ls -g` 已显示 `amz-cli`，但 Cherry 仍未列出它，就在 Cherry 当前实际工作目录执行一次项目级安装（不要带 `-g`）：
+
+```powershell
+cd D:\agent\chat   # 示例：替换为 Cherry 当前会话的真实工作目录
+npx skills add https://github.com/duomisenling/amzon-cli/tree/main/amz-cli/skills/amz-cli -y
+Test-Path .claude\skills\amz-cli\SKILL.md
+```
+
+最后一条必须返回 `True`。Skills 安装器会把 `amz-cli` 安装/链接到当前项目的 Agent Skills 目录；这与飞书 CLI 的 `lark-*` Skills 安装方式一致。不要手工复制 `SKILL.md`，否则以后更新仓库时容易留下旧版本。
+
+如果 Cherry 的当前工作目录本身就是 `C:\Tools\amzon-cli\amz-cli`，仓库也内置了以下发现入口：
 
 ```text
 .claude\skills\amz-cli\SKILL.md
 ```
 
-因此不需要把整份 `docs/AGENT.md` 粘贴进系统提示词，也不需要另外运行 `npx skills add`。`docs/AGENT.md` 只用于不支持项目 Skill 自动发现的环境。
+无论使用全局安装还是项目级安装，都不需要把整份 `docs/AGENT.md` 粘贴进系统提示词。`docs/AGENT.md` 只用于不支持 Agent Skills 自动发现的环境。
 
 ## 五、可选：接入完整关键词广告 MCP
 
@@ -227,9 +250,11 @@ cd amz-cli
 npm ci
 npm run build
 node dist\cli.js --version
+npx skills add https://github.com/duomisenling/amzon-cli/tree/main/amz-cli/skills/amz-cli -y -g
+npx skills ls -g
 ```
 
-Cherry 工作目录没有变化，新的代码、帮助和 Skill 会继续从原目录加载。更新后新开一个 Agent 会话，避免旧会话仍使用更新前的 Skill 上下文。
+最后两条用于同步更新全局 Skill；输出中必须仍有 `amz-cli`。如果之前还在某个 Cherry 工作目录做过项目级安装，也进入该目录重新执行一次不带 `-g` 的 `npx skills add ... -y`。更新后新开 Agent 会话，避免旧会话仍使用更新前的 Skill 上下文。
 
 如果 `git pull --ff-only` 提示本地文件冲突，不要删除目录或强制重置；先联系管理员检查本地修改。
 
@@ -240,12 +265,19 @@ Cherry 工作目录没有变化，新的代码、帮助和 Skill 会继续从原
 依次检查：
 
 ```powershell
-cd C:\Tools\amzon-cli\amz-cli
-Test-Path .claude\skills\amz-cli\SKILL.md
-Test-Path skills\amz-cli\SKILL.md
+npx skills ls -g
+Test-Path C:\Tools\amzon-cli\amz-cli\skills\amz-cli\SKILL.md
 ```
 
-两项都应返回 `True`。然后确认 Cherry 工作目录选的是内层 `amz-cli`，保存后新开会话。
+第一条应列出 `amz-cli`，第二条应返回 `True`。如果全局列表正常但当前会话仍找不到，再到 Cherry 的当前实际工作目录检查并补装项目级 Skill：
+
+```powershell
+cd D:\agent\chat   # 换成当前实际工作目录
+npx skills add https://github.com/duomisenling/amzon-cli/tree/main/amz-cli/skills/amz-cli -y
+Test-Path .claude\skills\amz-cli\SKILL.md
+```
+
+确认返回 `True` 后保存 Cherry 配置并新开会话。不要只检查 `C:\Tools\amzon-cli\amz-cli\.claude\skills`：如果它不是当前会话工作目录，那个入口存在也不代表本会话已经加载。
 
 ### 找不到 `dist\cli.js`
 
@@ -271,4 +303,4 @@ npm run build
 
 ### 是否必须新建 Agent
 
-不需要。同一个 Cherry Agent 可以添加多个工作目录；把本项目内层 `amz-cli` 目录加入现有 Agent 即可。若希望把 Amazon 权限与其他项目隔离，也可以另建专用 Agent，但这属于管理选择，不是技术要求。
+不需要。同一个 Cherry Agent 可以添加多个工作目录，但接入现有 Agent 时要完成两件事：把本项目内层 `amz-cli` 目录加入 Agent，让终端能够运行 CLI；同时按上文安装 AI Skill，让当前会话能够发现 `amz-cli`。若希望把 Amazon 权限与其他项目隔离，也可以另建专用 Agent，但这属于管理选择，不是技术要求。
