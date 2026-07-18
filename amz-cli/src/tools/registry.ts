@@ -16,47 +16,14 @@ import { createInterface } from 'node:readline/promises';
 import { Command } from 'commander';
 import { AmzError } from '../internal/errs/errors.js';
 import { outSuccess, progress } from '../internal/errs/output.js';
-import { SpApiClient } from '../internal/client/client.js';
-import { AdsClient } from '../internal/client/ads-client.js';
-import { LocalCredentialProvider } from '../internal/credential/local.js';
-import { BrokerCredentialProvider, brokerConfigFromEnv } from '../internal/credential/broker.js';
 import {
   issuePreviewToken,
   verifyAndConsumePreviewToken,
   verifyPreviewToken,
 } from '../internal/confirmation/preview-token.js';
-import { runtimeConfirmationSnapshot } from '../internal/confirmation/runtime-snapshot.js';
 import type { ToolContext, ToolDefinition } from './types.js';
-
-/**
- * 构造运行时依赖。两个 client 都是惰性单例:首次访问才解析凭证——
- * 纯广告命令不会被缺失的 SP 凭证卡住,反之亦然。
- * 凭证模式切换(业务代码无感知):
- *   .env 有 BROKER_URL → broker 模式(同事版,只有团队令牌)
- *   否则               → local 模式(开发者本机,.env 里的 refresh_token)
- */
-function buildContext(flags: Record<string, unknown>): ToolContext {
-  let spClient: SpApiClient | undefined;
-  let adsClient: AdsClient | undefined;
-  return {
-    get client(): SpApiClient {
-      if (!spClient) {
-        const brokerCfg = brokerConfigFromEnv();
-        const provider = brokerCfg
-          ? new BrokerCredentialProvider(brokerCfg)
-          : LocalCredentialProvider.fromEnv();
-        spClient = new SpApiClient(provider);
-      }
-      return spClient;
-    },
-    get adsClient(): AdsClient {
-      if (!adsClient) adsClient = new AdsClient();
-      return adsClient;
-    },
-    flags,
-    progress,
-  };
-}
+import { buildToolContext } from './context.js';
+import { applyConfirmedCapture, captureConfirmation, sameConfirmationSnapshot } from './confirmation.js';
 
 /** 框架级 flag 校验:按 Flag.enum 统一检查(大小写不敏感)并把值规范化。 */
 function validateFlags(tool: ToolDefinition, flags: Record<string, unknown>): void {
@@ -130,7 +97,7 @@ async function runTool(tool: ToolDefinition, flags: Record<string, unknown>): Pr
     });
   }
 
-  const ctx = buildContext(flags);
+  const ctx = buildToolContext(flags);
 
   // —— 写操作门槛(先于业务执行,架构级强制)——
   if (tool.mutation !== 'none') {
@@ -155,23 +122,28 @@ async function runTool(tool: ToolDefinition, flags: Record<string, unknown>): Pr
           message: `${tool.service} ${tool.command} declares mutation=${tool.mutation} but has no dryRun`,
         });
       }
-      const snapshotBefore = (await captureConfirmation(tool, flags, ctx)).snapshot;
+      const capturedBefore = await captureConfirmation(tool, flags, ctx);
+      ctx.confirmationState = capturedBefore.snapshot.remoteState;
       const preview = await tool.dryRun(ctx);
-      const snapshotAfter = (await captureConfirmation(tool, flags, ctx)).snapshot;
-      if (JSON.stringify(snapshotBefore) !== JSON.stringify(snapshotAfter)) {
+      const capturedAfter = await captureConfirmation(tool, flags, ctx);
+      if (!sameConfirmationSnapshot(capturedBefore.snapshot, capturedAfter.snapshot)) {
         throw new AmzError({
           type: 'invalid_param',
           subtype: 'preview_input_changed',
           hintAgent: 'fix_param',
-          hintHuman: '预览期间输入文件发生了变化，无法签发确认令牌。请确认文件不再修改后重新运行 --dry-run。',
+          hintHuman: '预览期间输入文件、账户或远端当前状态发生变化，无法签发确认令牌。请重新运行 --dry-run。',
           message: 'confirmation snapshot changed while dry-run was in progress',
         });
       }
-      const issued = issuePreviewToken(operationName(tool), flags, Date.now(), snapshotAfter);
+      const issued = issuePreviewToken(operationName(tool), flags, Date.now(), capturedAfter.snapshot);
+      // dryRun 输出保持渠道中立;CLI 专属的执行指引统一由框架在这里注入
       outSuccess(preview, {
         dry_run: true,
         preview_token: issued.token,
         preview_expires_at: issued.expiresAt,
+        next_step:
+          '人工核对预览后,以完全相同的业务参数把 --dry-run 换成 --confirm --preview-token <preview_token> 执行' +
+          (tool.mutation === 'irreversible' ? '(不可撤销操作,执行时需在交互式终端输入随机确认码)' : ''),
       });
       return;
     }
@@ -254,7 +226,7 @@ async function runTool(tool: ToolDefinition, flags: Record<string, unknown>): Pr
       Date.now(),
       confirmed.snapshot,
     );
-    ctx.confirmedInput = confirmed.input;
+    applyConfirmedCapture(ctx, confirmed);
   }
 
   const data = await tool.execute(ctx);
@@ -263,26 +235,6 @@ async function runTool(tool: ToolDefinition, flags: Record<string, unknown>): Pr
 
 function operationName(tool: ToolDefinition): string {
   return `${tool.service} ${tool.command}`;
-}
-
-async function captureConfirmation(
-  tool: ToolDefinition,
-  flags: Record<string, unknown>,
-  ctx: ToolContext,
-): Promise<{ snapshot: unknown; input: unknown }> {
-  const captured = tool.confirmationInput
-    ? tool.confirmationInput(flags)
-    : { snapshot: tool.confirmationSnapshot?.(flags), input: undefined };
-  return {
-    snapshot: {
-      runtime: runtimeConfirmationSnapshot(),
-      remoteIdentity: tool.confirmationRuntimeSnapshot
-        ? await tool.confirmationRuntimeSnapshot(ctx)
-        : undefined,
-      commandInput: captured.snapshot,
-    },
-    input: captured.input,
-  };
 }
 
 /**

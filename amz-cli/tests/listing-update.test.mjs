@@ -190,6 +190,30 @@ test('formal submission omits preview-only mode and identifiers', async () => {
   assert.doesNotMatch(requests[0].path, /identifiers|VALIDATION_PREVIEW/);
 });
 
+test('formal INVALID response is rejected instead of being reported as submitted', async () => {
+  process.env.SELLER_ID = 'SELLER';
+  const patches = [{ op: 'replace', path: '/attributes/item_name', value: [{ value: 'New name' }] }];
+  const { ctx } = context(patches, { status: 'INVALID', issues: [{ severity: 'ERROR', message: 'bad value' }] });
+  ctx.confirmedInput = patches;
+
+  await assert.rejects(
+    () => listingUpdate.execute(ctx),
+    (error) => error?.subtype === 'listing.submission_rejected',
+  );
+});
+
+test('formal response with missing status is treated as unknown and not retryable', async () => {
+  process.env.SELLER_ID = 'SELLER';
+  const patches = [{ op: 'replace', path: '/attributes/item_name', value: [{ value: 'New name' }] }];
+  const { ctx } = context(patches, { issues: [] });
+  ctx.confirmedInput = patches;
+
+  await assert.rejects(
+    () => listingUpdate.execute(ctx),
+    (error) => error?.subtype === 'listing.submission_status_unknown' && error?.retryable !== true,
+  );
+});
+
 test('Broker seller ID is authoritative and rejects an explicit mismatch', async () => {
   process.env.BROKER_URL = 'https://broker.example.test';
   process.env.SELLER_ID = 'STALE_LOCAL_SELLER';

@@ -19,7 +19,17 @@
 import { ADS_CONTENT_TYPES } from '../../internal/client/ads-client.js';
 import type { ToolDefinition } from '../../tools/types.js';
 import { strFlag } from '../common.js';
-import { ADS_REGION_FLAG, adsRegion, requireDate, requirePositiveAmount, requireProfileId, validateDateRange } from './common.js';
+import {
+  ADS_REGION_FLAG,
+  adsRegion,
+  assertAdsWriteAccepted,
+  requireDate,
+  requirePositiveAmount,
+  requireProfileId,
+  validateDateRange,
+  verifyAfterWrite,
+} from './common.js';
+import { fetchCampaign } from './campaign-budget.js';
 
 /** 从创建响应中尽力提取 campaignId(结构因响应版本而异,取不到不猜)。 */
 function extractCampaignId(resp: unknown): string | undefined {
@@ -99,7 +109,7 @@ export const adsCampaignCreate: ToolDefinition = {
     return {
       dry_run_note:
         '以下是将提交给亚马逊的完整内容(广告 API 无服务端预校验,此为客户端预览)。' +
-        '确认无误后把 --dry-run 换成 --confirm 执行。首次使用建议先在测试账户验证(ads test-account)。',
+        '请人工核对;确认后凭本次预览令牌执行正式写入。首次使用建议先在测试账户验证(ads test-account)。',
       endpoint: 'POST /sp/campaigns',
       payload,
       reminder:
@@ -120,19 +130,33 @@ export const adsCampaignCreate: ToolDefinition = {
       extraHeaders: { Prefer: 'return=representation' },
     });
 
+    assertAdsWriteAccepted(resp, 'campaigns', '广告活动创建');
     const campaignId = extractCampaignId(resp);
     const requestedState = strFlag(ctx.flags, 'state') ?? 'PAUSED';
-    if (requestedState === 'PAUSED' && campaignId) {
+    if (!campaignId) {
+      return {
+        result: resp,
+        verificationStatus: 'PENDING_OR_MISMATCH',
+        note: 'Amazon 响应中没有可识别的 campaignId，无法回查。不要自动重试创建，请先到广告后台核对。',
+      };
+    }
+
+    const verification = await verifyAfterWrite(
+      () => fetchCampaign(ctx.adsClient, profileId, campaignId, adsRegion(ctx.flags)),
+      (record) => record['state'] === requestedState,
+      '即时回读未确认新广告活动。不要自动重试创建，请稍后只读查询或到广告后台核对。',
+    );
+    if (requestedState === 'PAUSED') {
       return {
         campaignId,
         created: resp,
+        ...verification,
         enabled: false,
         note:
           '已保持暂停状态，不会产生花费。启用必须作为独立写操作先预览：' +
           `ads campaign-state --profile-id ${profileId} --campaign-id ${campaignId} --state ENABLED --dry-run`,
       };
     }
-
-    return { ...(campaignId ? { campaignId } : {}), result: resp };
+    return { campaignId, result: resp, ...verification };
   },
 };

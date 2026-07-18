@@ -10,10 +10,41 @@
 //            → ads negative-keyword 否掉 / ads keyword-bid 降竞价
 
 import { AmzError } from '../../internal/errs/errors.js';
-import { ADS_CONTENT_TYPES } from '../../internal/client/ads-client.js';
-import type { ToolDefinition } from '../../tools/types.js';
+import { AdsClient, ADS_CONTENT_TYPES } from '../../internal/client/ads-client.js';
+import type { ToolContext, ToolDefinition } from '../../tools/types.js';
 import { strFlag, validateNumberFlag } from '../common.js';
-import { ADS_REGION_FLAG, adsRegion, requirePositiveAmount, requireProfileId } from './common.js';
+import {
+  ADS_REGION_FLAG,
+  adsRegion,
+  assertAdsWriteAccepted,
+  assertChangeNeeded,
+  requirePositiveAmount,
+  requireProfileId,
+  verifyAfterWrite,
+} from './common.js';
+
+export async function fetchKeyword(
+  client: AdsClient,
+  profileId: string,
+  keywordId: string,
+  region?: 'na' | 'eu' | 'fe',
+): Promise<Record<string, unknown> | undefined> {
+  const resp = (await client.request('POST', '/sp/keywords/list', {
+    profileId,
+    region,
+    contentType: ADS_CONTENT_TYPES.spKeyword,
+    retry5xx: true,
+    body: { keywordIdFilter: { include: [keywordId] } },
+  })) as { keywords?: Array<Record<string, unknown>> } | null;
+  return resp?.keywords?.[0];
+}
+
+function keywordStateFromContext(ctx: ToolContext): Record<string, unknown> | undefined {
+  const value = ctx.confirmationState;
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
 
 // —— 读:列关键词 ——
 export const adsKeywords: ToolDefinition = {
@@ -83,19 +114,31 @@ export const adsKeywordBid: ToolDefinition = {
   },
   describe: (flags) =>
     `将关键词 ${strFlag(flags, 'keywordId')} 的竞价改为 ${strFlag(flags, 'bid')}(账户币种)`,
+  confirmationStateSnapshot: async (ctx) => {
+    const current = await fetchKeyword(
+      ctx.adsClient,
+      requireProfileId(ctx.flags),
+      strFlag(ctx.flags, 'keywordId')!,
+      adsRegion(ctx.flags),
+    );
+    if (!current) {
+      throw new AmzError({
+        type: 'invalid_param',
+        subtype: 'ads.keyword_not_found',
+        param: '--keyword-id',
+        hintAgent: 'fix_param',
+        hintHuman: '没有找到关键词，请用 ads keywords 核对。',
+        message: 'keyword not found while capturing confirmation state',
+      });
+    }
+    return current;
+  },
   dryRun: async (ctx) => {
     const profileId = requireProfileId(ctx.flags);
     const keywordId = strFlag(ctx.flags, 'keywordId')!;
 
-    ctx.progress('· 正在查询当前竞价做对照...');
-    const resp = (await ctx.adsClient.request('POST', '/sp/keywords/list', {
-      profileId,
-      region: adsRegion(ctx.flags),
-      contentType: ADS_CONTENT_TYPES.spKeyword,
-      retry5xx: true,
-      body: { keywordIdFilter: { include: [keywordId] } },
-    })) as { keywords?: Array<Record<string, unknown>> } | null;
-    const current = resp?.keywords?.[0];
+    ctx.progress('· 已查询当前竞价做对照...');
+    const current = keywordStateFromContext(ctx);
     if (!current) {
       throw new AmzError({
         type: 'invalid_param',
@@ -106,10 +149,12 @@ export const adsKeywordBid: ToolDefinition = {
         message: `keyword ${keywordId} not found`,
       });
     }
+    const newBid = requirePositiveAmount(ctx.flags, 'bid', '--bid');
+    assertChangeNeeded(Number(current['bid']), newBid, '关键词竞价');
     return {
-      dry_run_note: '确认以下改动后,把 --dry-run 换成 --confirm 执行。',
+      dry_run_note: '请人工核对以下竞价改动;确认后凭本次预览令牌执行正式写入。',
       keyword: { id: keywordId, text: current['keywordText'], matchType: current['matchType'], state: current['state'] },
-      change: { current_bid: current['bid'], new_bid: requirePositiveAmount(ctx.flags, 'bid', '--bid') },
+      change: { current_bid: current['bid'], new_bid: newBid },
     };
   },
   execute: async (ctx) => {
@@ -129,7 +174,15 @@ export const adsKeywordBid: ToolDefinition = {
       },
       extraHeaders: { Prefer: 'return=representation' },
     });
-    return { result: resp };
+    assertAdsWriteAccepted(resp, 'keywords', '竞价修改');
+    const keywordId = strFlag(ctx.flags, 'keywordId')!;
+    const newBid = requirePositiveAmount(ctx.flags, 'bid', '--bid');
+    const verification = await verifyAfterWrite(
+      () => fetchKeyword(ctx.adsClient, profileId, keywordId, adsRegion(ctx.flags)),
+      (record) => Number(record['bid']) === newBid,
+      '即时回读未确认新竞价。不要自动重试写入，请稍后只读查询或到广告后台核对。',
+    );
+    return { result: resp, ...verification };
   },
 };
 
@@ -160,7 +213,7 @@ export const adsNegativeKeyword: ToolDefinition = {
     `——此后这个搜索词不再触发该广告组的广告`,
   dryRun: async (ctx) => {
     return {
-      dry_run_note: '确认以下否定词后,把 --dry-run 换成 --confirm 执行。',
+      dry_run_note: '请人工核对以下否定词;确认后凭本次预览令牌执行正式写入。',
       endpoint: 'POST /sp/negativeKeywords',
       payload: buildNegativeKeywordBody(ctx.flags),
       effect: `搜索词「${strFlag(ctx.flags, 'text')}」将不再触发该广告组的广告(否定词可随时在后台暂停/删除,可逆)`,
@@ -176,7 +229,14 @@ export const adsNegativeKeyword: ToolDefinition = {
       body: buildNegativeKeywordBody(ctx.flags),
       extraHeaders: { Prefer: 'return=representation' },
     });
-    return { result: resp };
+    assertAdsWriteAccepted(resp, 'negativeKeywords', '否定词创建');
+    return {
+      result: resp,
+      verificationStatus: 'SERVER_RESPONSE_ONLY',
+      note:
+        '已返回 Amazon Ads 的创建响应。当前 CLI 未实现官方 negativeKeywords list 回读；' +
+        '如响应结构不含成功 ID，请到广告后台核对，不能自动重试创建。',
+    };
   },
 };
 

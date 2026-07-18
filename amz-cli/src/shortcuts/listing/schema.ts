@@ -37,6 +37,86 @@ interface JsonSchema {
   required?: string[];
 }
 
+interface SchemaTextMatch {
+  path: string;
+  value: string;
+}
+
+const MAX_MATCHED_TEXT_LENGTH = 240;
+const MAX_MATCHED_TEXT_PER_ATTRIBUTE = 20;
+
+function displayMatchedText(value: string): string {
+  if (value.length <= MAX_MATCHED_TEXT_LENGTH) return value;
+  return `${value.slice(0, MAX_MATCHED_TEXT_LENGTH - 1)}…`;
+}
+
+/**
+ * 搜索字段定义中的字符串值，而不是元数据键名。
+ * 例如 title_differentiation 的 title 是 "Item Highlight"；若把键名 title
+ * 也计入搜索，`--grep title` 会误命中几乎所有带 title 元数据的字段。
+ */
+function findSchemaTextMatches(
+  value: unknown,
+  needle: string,
+  path: string,
+  matches: SchemaTextMatch[] = [],
+  limit = MAX_MATCHED_TEXT_PER_ATTRIBUTE + 1,
+): SchemaTextMatch[] {
+  if (matches.length >= limit) return matches;
+  if (typeof value === 'string') {
+    if (value.toLowerCase().includes(needle)) {
+      matches.push({ path, value: displayMatchedText(value) });
+    }
+    return matches;
+  }
+  if (Array.isArray(value)) {
+    for (let index = 0; index < value.length; index += 1) {
+      findSchemaTextMatches(value[index], needle, `${path}[${index}]`, matches, limit);
+      if (matches.length >= limit) break;
+    }
+    return matches;
+  }
+  if (typeof value === 'object' && value !== null) {
+    for (const [key, child] of Object.entries(value)) {
+      findSchemaTextMatches(child, needle, `${path}.${key}`, matches, limit);
+      if (matches.length >= limit) break;
+    }
+  }
+  return matches;
+}
+
+function schemaDefinitionSummary(
+  attribute: string,
+  definition: unknown,
+  needle: string,
+): {
+  attribute: string;
+  matchedPaths: string[];
+  matchedText: SchemaTextMatch[];
+  matchedTextTruncated?: boolean;
+  title?: string;
+  description?: string;
+} {
+  const allMatchedText = findSchemaTextMatches(
+    definition,
+    needle,
+    `properties.${attribute}`,
+  );
+  const matchedTextTruncated = allMatchedText.length > MAX_MATCHED_TEXT_PER_ATTRIBUTE;
+  const matchedText = allMatchedText.slice(0, MAX_MATCHED_TEXT_PER_ATTRIBUTE);
+  const record = typeof definition === 'object' && definition !== null && !Array.isArray(definition)
+    ? definition as Record<string, unknown>
+    : undefined;
+  return {
+    attribute,
+    matchedPaths: matchedText.map((match) => match.path),
+    matchedText,
+    ...(matchedTextTruncated ? { matchedTextTruncated: true } : {}),
+    ...(typeof record?.title === 'string' ? { title: record.title } : {}),
+    ...(typeof record?.description === 'string' ? { description: record.description } : {}),
+  };
+}
+
 /** 官方口径为 Base64 MD5;兼容十六进制写法,防上游表示法变化造成误报。 */
 function verifySchemaChecksum(buf: Buffer, checksum: string): void {
   const digest = createHash('md5').update(buf).digest();
@@ -111,7 +191,10 @@ export const listingSchema: ToolDefinition = {
       enum: ['NONE', 'CHILD', 'PARENT'],
     },
     { name: 'attribute', desc: '只看某个字段的完整定义(如 item_name);不传则列出全部字段名' },
-    { name: 'grep', desc: '只列出字段名里含此关键词的字段(如 title / highlight),方便找新字段' },
+    {
+      name: 'grep',
+      desc: '搜索属性名及字段定义中的 title/description/examples 等字符串(如 title / highlight),方便找显示名与属性名不同的新字段',
+    },
     { name: 'raw', type: 'boolean', desc: '返回完整 JSON Schema(可能很大,慎用)' },
   ],
   execute: async (ctx) => {
@@ -198,19 +281,29 @@ export const listingSchema: ToolDefinition = {
       return { ...meta, schema };
     }
 
-    // ③ 默认:字段名概览(可用 --grep 过滤)
+    // ③ 默认:字段名概览(可用 --grep 搜索属性名和字段定义中的文本元数据)
     const grep = strFlag(ctx.flags, 'grep')?.toLowerCase();
     const allNames = Object.keys(props).sort();
-    const names = grep ? allNames.filter((n) => n.toLowerCase().includes(grep)) : allNames;
+    const matches = grep
+      ? allNames
+          .map((name) => ({
+            ...schemaDefinitionSummary(name, props[name], grep),
+            nameMatched: name.toLowerCase().includes(grep),
+          }))
+          .filter((match) => match.nameMatched || match.matchedText.length > 0)
+          .map(({ nameMatched: _nameMatched, ...match }) => match)
+      : [];
+    const names = grep ? matches.map((match) => match.attribute) : allNames;
 
     return {
       ...meta,
       totalAttributes: allNames.length,
       // NOT_ENFORCED 下顶层 required 通常为空,这是预期行为(局部 patch 不需要全量必填)
       topLevelRequiredAttributes: schema.required ?? [],
-      ...(grep ? { grep, matched: names.length } : {}),
+      ...(grep ? { grep, matched: names.length, matches } : {}),
       attributes: names,
-      hint: '用 --attribute <字段名> 看某个字段的完整结构;--grep <关键词> 过滤字段名;--raw 看完整 schema',
+      hint:
+        '用 --attribute <字段名> 看某个字段的完整结构;--grep <关键词> 搜索属性名及字段定义文本;--raw 看完整 schema',
     };
   },
 };

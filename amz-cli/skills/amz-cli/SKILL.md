@@ -67,7 +67,9 @@ Broker 模式下，`listing mine/sku/schema/update` 的 Seller ID 必须来自 B
 
 `ads campaign-create` 仍只创建 Campaign 外壳。用户说“用这些关键词建广告”时，应使用 `ads keyword-campaign-launch`：先确认 profile/区域、ASIN 或 SKU、预算、日期、竞价策略、广告组默认竞价、每个关键词的匹配方式与竞价，以及创建后是否启用；生成固定 JSON 方案并 dry-run。正式流程先建 PAUSED Campaign，所有子对象回读成功后才启用。
 
-若当前 Cherry 已配置项目自带的 `amz-cli-mcp`，可使用 `prepare_keyword_campaign` 预览；只有用户在 Cherry 工具审批卡中明确批准后才能调用 `launch_keyword_campaign`。不得自动批准正式工具，不得使用 `bypassPermissions`，聊天中的“确定”不能替代工具审批。方案变化后必须重新 prepare。
+若当前 Cherry 已配置项目自带的 `amz-cli-mcp`，Listing、Feed 和运营广告写操作可使用对应的 `prepare_*` 预览，再由用户在 Cherry 审批卡批准对应 `apply_*`；完整关键词广告使用 `prepare_keyword_campaign` → `launch_keyword_campaign`。不得自动批准正式工具，不得使用 `bypassPermissions`，聊天中的“确定/Y”不能替代工具审批。业务参数、文件、账户、区域或预览依据的远端状态变化后必须重新 prepare。
+
+MCP 正式写工具还受管理员配置的 `AMZ_MCP_ALLOWED_WRITES` 白名单限制；被拒绝时报告给管理员，不得自行扩大权限。Feed 返回 `SUBMITTED` 后继续用只读状态/结果查询，只有 `DONE` 且结果文档核对完成才能报告各行成功。Listing 正式提交的 `ACCEPTED` 和即时回读也不代表前台目录已最终生效。
 
 不要尝试伪造 TTY、预览令牌或直接使用 Amazon bearer token 绕过 CLI。不要在聊天、提示词或输出中记录 refresh token、team token、client secret。
 

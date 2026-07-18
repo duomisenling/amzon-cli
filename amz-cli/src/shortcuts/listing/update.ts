@@ -28,6 +28,15 @@ interface JsonPatch {
   value?: Array<Record<string, unknown>>;
 }
 
+interface ListingConfirmationState {
+  sandbox?: boolean;
+  sellerId?: string;
+  region?: string;
+  marketplaceId?: string;
+  sku?: string;
+  currentValues?: Record<string, unknown>;
+}
+
 const PATCH_OPS = new Set<JsonPatch['op']>(['add', 'replace', 'merge', 'delete']);
 const PATCH_OPS_REQUIRING_VALUE = new Set<JsonPatch['op']>(['add', 'replace', 'merge']);
 const MERGE_PATHS = new Set([
@@ -172,6 +181,37 @@ function touchedAttributes(patches: JsonPatch[]): string[] {
   return [...names];
 }
 
+async function captureListingState(ctx: ToolContext): Promise<ListingConfirmationState> {
+  if (isSandboxMode()) return { sandbox: true };
+  const patches = parsePatches(ctx.flags);
+  const mkt = resolveMarketplace(ctx.flags['marketplace']);
+  const sellerId = await resolveSellerId(ctx.flags, mkt.region, ctx.client);
+  const sku = strFlag(ctx.flags, 'sku')!;
+  const current = (await ctx.client.get(
+    `/listings/2021-08-01/items/${encodeURIComponent(sellerId)}/${encodeURIComponent(sku)}`,
+    { marketplaceIds: mkt.id, includedData: 'summaries,attributes' },
+    mkt.region,
+  )) as { attributes?: Record<string, unknown> };
+  const currentValues: Record<string, unknown> = {};
+  for (const name of touchedAttributes(patches)) {
+    currentValues[name] = current.attributes?.[name] ?? '(当前无此属性)';
+  }
+  return {
+    sellerId,
+    region: mkt.region,
+    marketplaceId: mkt.id,
+    sku,
+    currentValues,
+  };
+}
+
+function listingStateFromContext(ctx: ToolContext): ListingConfirmationState {
+  const state = ctx.confirmationState;
+  return state && typeof state === 'object' && !Array.isArray(state)
+    ? state as ListingConfirmationState
+    : {};
+}
+
 async function callPatch(
   ctx: ToolContext,
   opts: { validationPreview: boolean; patches?: JsonPatch[] },
@@ -236,6 +276,29 @@ function assertValidationPassed(validation: Record<string, unknown>): void {
   });
 }
 
+function assertSubmissionAccepted(submission: Record<string, unknown>): void {
+  if (submission.status === 'ACCEPTED') return;
+  if (submission.status === 'INVALID') {
+    throw new AmzError({
+      type: 'invalid_param',
+      subtype: 'listing.submission_rejected',
+      param: '--patches',
+      hintAgent: 'fix_param',
+      hintHuman: 'Amazon 正式提交返回 INVALID，本次修改未被接受。请根据 issues 修正后重新预览。',
+      message: `listing submission rejected: ${JSON.stringify(submission).slice(0, 2000)}`,
+    });
+  }
+  throw new AmzError({
+    type: 'upstream_error',
+    subtype: 'listing.submission_status_unknown',
+    hintAgent: 'report_to_human',
+    hintHuman:
+      `Amazon 正式提交返回非预期状态 ${String(submission.status ?? 'missing')}，无法确认是否接受。` +
+      '不要自动重试，请先用 listing sku 或 Seller Central 核对。',
+    message: `unexpected listing submission response: ${JSON.stringify(submission).slice(0, 2000)}`,
+  });
+}
+
 export const listingUpdate: ToolDefinition = {
   service: 'listing',
   command: 'update',
@@ -291,6 +354,7 @@ export const listingUpdate: ToolDefinition = {
       marketplaceId: mkt.id,
     };
   },
+  confirmationStateSnapshot: captureListingState,
   dryRun: async (ctx) => {
     const patches = parsePatches(ctx.flags);
     const mkt = resolveMarketplace(ctx.flags['marketplace']);
@@ -312,19 +376,10 @@ export const listingUpdate: ToolDefinition = {
       };
     }
 
-    // 规格 §8.2 rule 3:必须先拉当前状态做对照,不能盲改
-    ctx.progress('· [dry-run 1/2] 拉取当前 listing 值做对照...');
-    const attrs = touchedAttributes(patches);
-    const current = (await ctx.client.get(
-      `/listings/2021-08-01/items/${encodeURIComponent(sellerId)}/${encodeURIComponent(sku)}`,
-      { marketplaceIds: mkt.id, includedData: 'summaries,attributes' },
-      mkt.region,
-    )) as { attributes?: Record<string, unknown>; summaries?: unknown };
-
-    const currentTouched: Record<string, unknown> = {};
-    for (const name of attrs) {
-      currentTouched[name] = current.attributes?.[name] ?? '(当前无此属性)';
-    }
+    // 规格 §8.2 rule 3:必须先展示当前状态做对照,不能盲改
+    // (当前值由框架门禁在预览前通过 confirmationStateSnapshot 拉取并绑定进令牌)
+    ctx.progress('· [dry-run 1/2] 载入门禁预读的当前 listing 值做对照...');
+    const currentTouched = listingStateFromContext(ctx).currentValues ?? {};
 
     ctx.progress('· [dry-run 2/2] 调用官方 VALIDATION_PREVIEW 服务端校验(不落库)...');
     const validation = await callPatch(ctx, { validationPreview: true });
@@ -339,8 +394,8 @@ export const listingUpdate: ToolDefinition = {
       },
       validation,
       next:
-        '人工核对以上"当前值 → 改动"无误后,使用输出 meta.preview_token，' +
-        '以完全相同的业务参数加 --confirm --preview-token <令牌> 执行',
+        '人工核对以上"当前值 → 改动"无误后,在 15 分钟内凭本次预览令牌、' +
+        '以完全相同的业务参数执行正式提交',
     };
   },
   execute: async (ctx) => {
@@ -348,10 +403,38 @@ export const listingUpdate: ToolDefinition = {
     const confirmedPatches = Array.isArray(ctx.confirmedInput)
       ? (ctx.confirmedInput as JsonPatch[])
       : undefined;
-    const result = await callPatch(ctx, {
+    const submission = await callPatch(ctx, {
       validationPreview: false,
       patches: confirmedPatches,
     });
-    return result;
+    assertSubmissionAccepted(submission);
+    // PATCH 已被 Amazon 接受。从这里起任何回读准备/读取失败都只能记录为 readbackError,
+    // 必须照常返回 SUBMITTED——否则会把已成功的提交误报成失败,诱导危险的重复提交。
+    let immediateReadback: unknown;
+    let readbackError: string | undefined;
+    try {
+      const mkt = resolveMarketplace(ctx.flags['marketplace']);
+      // 门禁在执行前刚捕获过身份快照,优先复用,减少一次 Broker 凭证解析
+      const sellerId =
+        listingStateFromContext(ctx).sellerId ??
+        (await resolveSellerId(ctx.flags, mkt.region, ctx.client));
+      const sku = strFlag(ctx.flags, 'sku')!;
+      immediateReadback = await ctx.client.get(
+        `/listings/2021-08-01/items/${encodeURIComponent(sellerId)}/${encodeURIComponent(sku)}`,
+        { marketplaceIds: mkt.id, includedData: 'attributes,issues' },
+        mkt.region,
+      );
+    } catch (error) {
+      readbackError = error instanceof Error ? error.message : String(error);
+    }
+    return {
+      processingStatus: 'SUBMITTED',
+      submission,
+      ...(immediateReadback !== undefined ? { immediateReadback } : {}),
+      ...(readbackError ? { readbackError } : {}),
+      note:
+        '正式 PATCH 已提交。即时回读可能仍是旧值；Amazon 会继续异步处理目录数据，' +
+        '不能仅凭本响应宣称前台已最终生效。请稍后用 listing sku --include attributes,issues 复核。',
+    };
   },
 };

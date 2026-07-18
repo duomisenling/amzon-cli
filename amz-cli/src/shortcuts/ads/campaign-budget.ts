@@ -9,12 +9,21 @@
 
 import { AmzError } from '../../internal/errs/errors.js';
 import { AdsClient, ADS_CONTENT_TYPES } from '../../internal/client/ads-client.js';
-import type { ToolDefinition } from '../../tools/types.js';
+import type { ToolContext, ToolDefinition } from '../../tools/types.js';
 import { strFlag } from '../common.js';
-import { ADS_REGION_FLAG, adsRegion, requireCampaignId, requirePositiveAmount, requireProfileId } from './common.js';
+import {
+  ADS_REGION_FLAG,
+  adsRegion,
+  assertAdsWriteAccepted,
+  assertChangeNeeded,
+  requireCampaignId,
+  requirePositiveAmount,
+  requireProfileId,
+  verifyAfterWrite,
+} from './common.js';
 
 /** 查单个 campaign 的当前信息(名称/预算/状态)。 */
-async function fetchCampaign(
+export async function fetchCampaign(
   client: AdsClient,
   profileId: string,
   campaignId: string,
@@ -28,6 +37,13 @@ async function fetchCampaign(
     body: { campaignIdFilter: { include: [campaignId] } },
   })) as { campaigns?: Array<Record<string, unknown>> } | null;
   return resp?.campaigns?.[0];
+}
+
+function campaignStateFromContext(ctx: ToolContext): Record<string, unknown> | undefined {
+  const value = ctx.confirmationState;
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
 }
 
 export const adsCampaignBudget: ToolDefinition = {
@@ -49,13 +65,32 @@ export const adsCampaignBudget: ToolDefinition = {
   describe: (flags) =>
     `将广告账户 ${strFlag(flags, 'profileId')} 的广告活动 ${strFlag(flags, 'campaignId')} ` +
     `日预算改为 ${strFlag(flags, 'dailyBudget')}(账户币种)`,
+  confirmationStateSnapshot: async (ctx) => {
+    const current = await fetchCampaign(
+      ctx.adsClient,
+      requireProfileId(ctx.flags),
+      requireCampaignId(ctx.flags),
+      adsRegion(ctx.flags),
+    );
+    if (!current) {
+      throw new AmzError({
+        type: 'invalid_param',
+        subtype: 'ads.campaign_not_found',
+        param: '--campaign-id',
+        hintAgent: 'fix_param',
+        hintHuman: '没有找到广告活动，请用 ads campaigns 核对账户和 campaign-id。',
+        message: 'campaign not found while capturing confirmation state',
+      });
+    }
+    return current;
+  },
   dryRun: async (ctx) => {
     const profileId = requireProfileId(ctx.flags);
     const campaignId = requireCampaignId(ctx.flags);
     const newBudget = requirePositiveAmount(ctx.flags, 'dailyBudget', '--daily-budget');
 
-    ctx.progress('· 正在查询当前预算做对照...');
-    const current = await fetchCampaign(ctx.adsClient, profileId, campaignId, adsRegion(ctx.flags));
+    ctx.progress('· 已查询当前预算做对照...');
+    const current = campaignStateFromContext(ctx);
     if (!current) {
       throw new AmzError({
         type: 'invalid_param',
@@ -67,8 +102,9 @@ export const adsCampaignBudget: ToolDefinition = {
       });
     }
     const currentBudget = (current['budget'] as Record<string, unknown> | undefined)?.['budget'];
+    assertChangeNeeded(Number(currentBudget), newBudget, '日预算');
     return {
-      dry_run_note: '确认以下改动后,把 --dry-run 换成 --confirm 执行。',
+      dry_run_note: '请人工核对以下预算改动;确认后凭本次预览令牌执行正式写入。',
       campaign: { id: campaignId, name: current['name'], state: current['state'] },
       change: {
         current_daily_budget: currentBudget,
@@ -91,6 +127,12 @@ export const adsCampaignBudget: ToolDefinition = {
       },
       extraHeaders: { Prefer: 'return=representation' },
     });
-    return { result: resp };
+    assertAdsWriteAccepted(resp, 'campaigns', '预算修改');
+    const verification = await verifyAfterWrite(
+      () => fetchCampaign(ctx.adsClient, profileId, campaignId, adsRegion(ctx.flags)),
+      (record) => Number((record['budget'] as Record<string, unknown> | undefined)?.['budget']) === newBudget,
+      '即时回读未确认新预算。不要自动重试写入，请稍后只读查询或到广告后台核对。',
+    );
+    return { result: resp, ...verification };
   },
 };

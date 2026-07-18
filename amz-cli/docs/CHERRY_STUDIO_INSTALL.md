@@ -1,6 +1,6 @@
 # Cherry Studio Agent 安装与更新指南
 
-本指南适合在 Windows 上把 amz-cli 接入 Cherry Studio。无需新建 Agent，也无需把 Git 仓库长期设为工作目录；正式安装后，CLI 和 Skill 都是用户级安装，可在任意工作目录使用。
+本指南适合在 Windows 上把 amz-cli 接入 Cherry Studio。无需新建 Agent，也无需把 Git 仓库长期设为工作目录。正式安装会先完成用户级 CLI 和通用 Skill 安装；随后还要用 Cherry Studio 内置的 `skills` 工具完成一次登记，才能在不依赖项目工作目录的新会话中持续使用。
 
 ## 一、安装前准备
 
@@ -19,7 +19,7 @@ npm --version
 
 `node --version` 必须是 `v20` 或更高。npm 安装不要求同事拥有 GitHub 账号，也不要求安装 Git。
 
-## 二、一条命令安装
+## 二、安装 CLI 与通用 Skill
 
 可先只看计划，不修改系统、不安装全局包：
 
@@ -36,7 +36,7 @@ npx amz-cli@latest install
 安装器会完成：
 
 1. 安装或升级全局 `amz-cli` 与 `amz-cli-mcp` 命令。
-2. 从这个 npm 包中安装完全同版本的 Agent Skill，不从 GitHub `main` 混用其他版本。
+2. 从这个 npm 包中把完全同版本的 Agent Skill 安装到通用全局目录 `~/.agents/skills/amz-cli`，不从 GitHub `main` 混用其他版本。
 3. 首次安装时创建不含真实凭证的 `%USERPROFILE%\.amz-cli\.env` 模板；已有文件绝不覆盖。
 
 验证：
@@ -44,13 +44,44 @@ npx amz-cli@latest install
 ```powershell
 amz-cli --version
 amz-cli --help
-npx skills ls -g
 amz-cli config path
+Test-Path "$env:USERPROFILE\.agents\skills\amz-cli\SKILL.md"
 ```
 
-`--help` 应显示 `auth / listing / orders / sales / ads` 等命令组；Skills 列表应出现 `amz-cli`。
+`--help` 应显示 `auth / listing / orders / sales / ads` 等命令组；最后一项应返回 `True`。这只证明通用 Skill 已安装，**不代表 Cherry Studio 已经登记该 Skill**。
 
 > 首次 npm 版本正式发布前，`npx amz-cli@latest` 会返回 404。此时使用本指南后面的“源码开发与应急安装”，不要下载来源不明的同名包。
+
+### Cherry Studio 持久注册（必须）
+
+如果由 Cherry Studio Agent 协助安装，把下面整段要求交给它。这里的 `skills` 指 Cherry Studio 注入给 Agent 的内置工具，不是 PowerShell 中的 `npx skills` 命令：
+
+```text
+请完成 amz-cli 的 Cherry Studio 持久注册：
+
+1. 先确认 amz-cli --version 成功，并确认
+   ~/.agents/skills/amz-cli/SKILL.md 存在。
+2. 调用 Cherry Studio 内置 skills 工具的 init 操作，name=amz-cli，
+   取得 Cherry 全局技能目录。不要用 npx skills 代替。
+3. 将 ~/.agents/skills/amz-cli/ 中的全部文件复制到 init 返回的目录，
+   不修改文件内容。
+4. 如果目标目录存在来源不明的同名文件，立即停止并告诉我，不要覆盖，
+   也不要直接修改 Cherry Studio 数据库。
+5. 确认目标目录包含 SKILL.md 后，调用 Cherry 内置 skills 工具的
+   register 操作，name=amz-cli。
+6. 调用 Cherry 内置 skills list，确认 amz-cli 已登记并为当前 Agent
+   启用；最后只报告安装路径和启用状态，不输出任何 .env 内容。
+```
+
+Cherry 内置 `register` 会把目录登记到 Cherry 的技能库，并为当前 Agent 启用。只运行外部 `npx skills add`、只看到 `~/.agents/skills/amz-cli`，或者只把 Git 仓库加入工作目录，都不等于完成了 Cherry 注册。
+
+注册后检查：
+
+```powershell
+Test-Path "$env:APPDATA\CherryStudio\Data\Skills\amz-cli\SKILL.md"
+```
+
+结果应为 `True`，并且 Cherry Studio 的“设置 → Skills”中应出现 `amz-cli`。如果内置 `skills list` 显示已登记，但这个固定路径不存在，以内置工具返回的实际路径为准，不要手动修改 Cherry 数据库。
 
 ## 三、配置凭证
 
@@ -118,17 +149,17 @@ SP_API_REGION=na
 ## 四、接入现有 Cherry Studio Agent
 
 1. 打开 Cherry Studio 的 Agent 编辑页面。
-2. 进入“技能”，确认 `amz-cli` 已启用；若没有，点击“添加更多技能”进入 Skills 管理页面检查安装结果。
+2. 进入“技能”，确认已登记的 `amz-cli` 对当前 Agent 启用；若没有，点击“添加更多技能”进入 Skills 管理页面检查注册结果。
 3. 在“工具”或“权限模式”中，允许 Agent 执行终端/Bash 命令。
 4. 保存后新开一个会话，让 Skill 清单重新加载。
 
-正式 npm 安装后不要求把 amz-cli Git 仓库设为工作目录。已有 Agent 可以直接使用；如果希望隔离 Amazon 权限，也可以建立专用 Agent，但这属于安全管理选择，不是技术要求。
+完成 npm 安装和 Cherry `register` 后，不要求把 amz-cli Git 仓库设为工作目录。已有 Agent 可以直接启用；同一个 Agent 的新会话会继续使用该技能，换另一个 Agent 后需要在那个 Agent 中启用。如果希望隔离 Amazon 权限，也可以建立专用 Agent，但这属于安全管理选择，不是技术要求。
 
 不要把整份 `docs/AGENT.md` 粘贴进系统提示词。支持 Skill 的环境使用已安装的 `amz-cli` Skill；`docs/AGENT.md` 只作为不支持 Skill 的兼容说明。
 
-## 五、可选：完整关键词广告 MCP
+## 五、可选：安全写操作 MCP
 
-普通查询、普通 CLI 命令和所有 `--dry-run` 都不依赖 MCP。只有希望实现“AI 展示完整广告方案 → 你在 Cherry 审批 → 自动创建并在校验后启动”时才配置。
+普通查询、普通 CLI 命令和所有 `--dry-run` 都不依赖 MCP。只有希望实现“AI 展示预览 → 你在 Cherry 审批卡点允许 → Agent 正式执行并回查”时才配置。当前覆盖 Listing 修改、Feed 提交、广告活动创建/启停/预算、关键词竞价、否定关键词和完整关键词广告。
 
 查找全局 MCP 服务文件：
 
@@ -144,13 +175,22 @@ Test-Path $mcpServer
 在 Cherry Studio 的 MCP 服务器设置中新增 `stdio` 服务：
 
 ```text
-名称: Amazon Ads Safe Launch
+名称: Amazon Safe Writes
 类型: stdio
 命令: 上面 $node 输出的完整路径
 参数: 上面 $mcpServer 输出的完整路径
 环境变量:
   AMZ_MCP_ALLOW_WRITES=true
+  AMZ_MCP_ALLOWED_WRITES=listing.update,ads.campaign-create,ads.campaign-state,ads.campaign-budget,ads.keyword-bid,ads.negative-keyword,ads.keyword-campaign-launch
 ```
+
+只有确实需要 Feed 批量提交的运营环境才在白名单追加 `feed.submit`。不要为了省事使用 `*`。白名单的取值语义：
+
+- **未设置** `AMZ_MCP_ALLOWED_WRITES`：为兼容旧版只开放 `ads.keyword-campaign-launch`，其他正式写工具安全拒绝。
+- **显式设置为空**（`AMZ_MCP_ALLOWED_WRITES=` 留空）：拒绝全部正式写入，包括旧默认操作。想吊销所有写权限时用这个。
+- **设置了列表**：只开放列表内的操作；旧默认操作如仍需要必须显式列入。
+
+注意：`prepare_*` 不受写开关和白名单限制（预览本来就是希望 Agent 自动完成的部分），但它会使用配置的凭证发起真实 Amazon API 调用——包括只读查询和 Listing 的 `VALIDATION_PREVIEW` PATCH（官方保证不落库、不产生变更）。`prepare_*` 的返回里有 `applyAllowed` 字段，预告当前环境是否会放行对应的 `apply_*`；为 `false` 时令牌无法兑现，不要发起审批。
 
 MCP 默认也会回退读取 `%USERPROFILE%\.amz-cli\.env`。只有明确希望它读取某个项目目录的 `.env` 时，才额外设置：
 
@@ -161,14 +201,23 @@ AMZ_CLI_PROJECT_DIR=C:\你的\项目目录
 安全设置必须同时满足：
 
 1. Agent 权限模式使用 `default`，禁止 `bypassPermissions`。
-2. `launch_keyword_campaign` 每次调用都需要人工批准，不能加入自动批准列表。
-3. `prepare_keyword_campaign` 是只读预览；`launch_keyword_campaign` 会创建广告并可能开始花钱。
-4. 审批卡中的预算、商品、关键词数量或最终状态与预览不一致时，拒绝审批并重新 prepare。
+2. 所有 `apply_*` 和 `launch_keyword_campaign` 每次调用都需要人工批准，不能加入自动批准列表。
+3. `prepare_*` 只做本地检查、只读查询或 Amazon `VALIDATION_PREVIEW`；`apply_*` / `launch_*` 才会正式写入。
+4. 审批卡中的站点、账号、SKU、文件、预算、竞价、关键词或最终状态与预览不一致时，拒绝审批并重新 prepare。
+5. 聊天文字里的“确认”“Y”不能代替 Cherry 工具审批卡。
 
-MCP 的两个工具：
+MCP 工具采用成对设计：
 
-- `prepare_keyword_campaign`：本地校验完整方案，零 Amazon 写请求，返回 15 分钟有效的一次性 `previewToken`。
-- `launch_keyword_campaign`：只接受同一方案和对应令牌；方案、账户、环境发生变化，或令牌过期/已使用，都会拒绝。
+- `prepare_listing_update` / `apply_listing_update`
+- `prepare_feed_submit` / `apply_feed_submit`
+- `prepare_ads_campaign_create` / `apply_ads_campaign_create`
+- `prepare_ads_campaign_state` / `apply_ads_campaign_state`
+- `prepare_ads_campaign_budget` / `apply_ads_campaign_budget`
+- `prepare_ads_keyword_bid` / `apply_ads_keyword_bid`
+- `prepare_ads_negative_keyword` / `apply_ads_negative_keyword`
+- `prepare_keyword_campaign` / `launch_keyword_campaign`
+
+预览令牌 15 分钟有效且只能使用一次，并绑定业务参数、账号、区域、凭证环境、文件内容，以及 Listing/预算/竞价等操作预览时的远端当前状态。执行前状态有变化会拒绝旧令牌。Listing 正式提交后的即时回读可能仍是旧值；Feed 返回 `SUBMITTED`/队列状态后还必须等待 `DONE` 并读取结果文档，不能提前宣称全部成功。
 
 不配置 MCP 不影响 CLI 安全性；正式写执行仍可由本人在 PowerShell 中运行 `--confirm --preview-token ...`。
 
@@ -230,13 +279,13 @@ Agent 应选择 `sales stats --asin`，不应创建全店报告。
 
 Agent 应询问需要“单个商品表现、全店汇总，还是导出全店明细文件”，不应直接调用 CLI；若上下文已明确站点、商品和时间范围，不应重复询问。
 
-### 5. 完整关键词广告预览测试
+### 5. MCP 写操作预览测试
 
 ```powershell
 amz-cli ads keyword-campaign-launch --plan .\my-keyword-campaign.json --dry-run
 ```
 
-若已配置 MCP，Agent 应调用 `prepare_keyword_campaign`。两条路径都必须展示 PAUSED 创建、全部关键词、日预算、最终是否启用和预览令牌，并且不能产生 Amazon 写请求。
+若已配置 MCP，完整关键词广告应调用 `prepare_keyword_campaign`；普通 Listing/Feed/广告修改应调用对应的 `prepare_*`。预览必须展示目标、改动、风险和预览令牌，正式工具在用户批准审批卡前不得调用。
 
 首次真实写入只使用 Amazon Ads 测试账户或明确指定的非核心商品。任一子对象失败时，结果必须显示 Campaign 保持暂停，不得报告“已经启动”。
 
@@ -249,9 +298,9 @@ npx amz-cli@latest install
 amz-cli --version
 ```
 
-安装器会保留 `%USERPROFILE%\.amz-cli\.env`，不会覆盖凭证。更新后新开 Cherry 会话，避免旧会话继续使用更新前的 Skill 上下文。
+安装器会保留 `%USERPROFILE%\.amz-cli\.env`，不会覆盖凭证。更新命令会刷新 `~/.agents/skills/amz-cli`，但不会自动改写 Cherry 内部登记；随后应让 Cherry Agent 用内置 `skills list` 找到现有 `amz-cli` 路径，把通用目录中的同版本文件同步过去，再调用 `register name=amz-cli`。如果现有目录不是 Cherry 管理的 `amz-cli`，或含有来源不明的同名文件，应停止并让用户核对，不得盲目覆盖。完成后新开 Cherry 会话，避免旧会话继续使用更新前的 Skill 上下文。
 
-卸载程序和 Skill：
+卸载前先在 Cherry Studio 的 Skills 管理页面卸载 `amz-cli`，让 Cherry 清理登记和 Agent 链接；然后卸载程序和通用 Skill：
 
 ```powershell
 npm uninstall -g amz-cli
@@ -292,17 +341,25 @@ npx skills add $skillPath -y -g
 ### Agent 说找不到 amz-cli Skill
 
 ```powershell
-npx skills ls -g
 amz-cli --version
+Test-Path "$env:USERPROFILE\.agents\skills\amz-cli\SKILL.md"
+Test-Path "$env:APPDATA\CherryStudio\Data\Skills\amz-cli\SKILL.md"
 ```
 
-若 CLI 存在但 Skills 列表没有 `amz-cli`，重新运行：
+按结果判断：
+
+- CLI 不存在：重新运行正式安装。
+- CLI 存在，但第一个 `Test-Path` 为 `False`：通用 Skill 没有安装完整，重新运行正式安装。
+- 第一个为 `True`、第二个为 `False`：CLI 和通用 Skill 已安装，但尚未登记到 Cherry；按本指南“Cherry Studio 持久注册”执行 `init` / `register`。
+- 两项均为 `True`，但当前 Agent 找不到：在当前 Agent 的“技能”页面启用 `amz-cli` 并新开会话。
+
+重新安装命令：
 
 ```powershell
 npx amz-cli@latest install
 ```
 
-然后在 Cherry 的 Agent“技能”页面启用它并新开会话。不要把 Skill 项目级安装进一个无关项目来绕过问题，否则容易出现 Skill 找到了、CLI 或凭证路径却不一致。
+不要把 Skill 项目级安装进一个无关项目来绕过注册，否则容易出现当前工作目录能找到、换会话就消失，或者 CLI 与凭证路径不一致。
 
 ### PowerShell 找不到 `amz-cli`
 
@@ -325,4 +382,4 @@ Get-Command amz-cli
 
 ### 是否必须新建 Agent
 
-不需要。已有 Cherry Agent 可以启用全局 `amz-cli` Skill。只有希望把 Amazon 凭证和其他项目隔离时，才建议建立专用 Agent。
+不需要。已有 Cherry Agent 可以启用 Cherry 技能库中已登记的 `amz-cli`。只有希望把 Amazon 凭证和其他项目隔离时，才建议建立专用 Agent。Cherry 的启用状态按 Agent 保存，因此换另一个 Agent 后需要为它单独启用。

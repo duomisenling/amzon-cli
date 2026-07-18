@@ -35,6 +35,8 @@ export interface ToolContext {
   flags: Record<string, unknown>;
   /** 人工确认后已校验并冻结的执行输入；文件型写操作必须使用它，不能重新读路径。 */
   confirmedInput?: unknown;
+  /** 预览/执行门禁预先读取的远端状态；dryRun 应复用它，避免展示值与令牌绑定值不一致。 */
+  confirmationState?: unknown;
   /** 进度输出(走 stderr,不污染 stdout 数据) */
   progress: (msg: string) => void;
 }
@@ -86,6 +88,11 @@ export interface ToolDefinition {
    * 该值会同时绑定到 dry-run 与 confirm，防止两次命令之间远端账户映射变化。
    */
   confirmationRuntimeSnapshot?: (ctx: ToolContext) => Promise<unknown>;
+  /**
+   * 会影响本次修改判断的远端当前状态（例如当前预算、竞价或 listing 属性）。
+   * 框架会在预览前后及正式执行前重新读取；状态变化会使旧预览令牌失效。
+   */
+  confirmationStateSnapshot?: (ctx: ToolContext) => Promise<unknown>;
   /** 主逻辑:返回值 = stdout 的 data 字段(业务代码不直接写 stdout) */
   execute: (ctx: ToolContext) => Promise<unknown>;
 }

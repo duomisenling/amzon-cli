@@ -227,13 +227,15 @@ amz-cli listing sku --marketplace US --sku "你的SKU"
 amz-cli listing sku --marketplace US --sku "你的SKU" --include productTypes
 # 再查这个产品类型的最新 schema(所有可填字段)
 amz-cli listing schema --marketplace US --product-type ROTATING_TRAY
-# 只找标题/亮点相关字段
+# 搜索属性名以及字段定义中的 title / description / examples 等文本
 amz-cli listing schema --marketplace US --product-type ROTATING_TRAY --grep title
 # 看某个字段的完整定义(结构/规则/字数限制)
 amz-cli listing schema --marketplace US --product-type ROTATING_TRAY --attribute item_name
 ```
 
 拉的是亚马逊**最新、卖家专属**的 schema(自动带上 .env 里的 SELLER_ID)。编辑 listing 前先用它拿到字段的确切名字和结构,再用 `listing update` 照着改,避免凭空拼错被拒。
+
+`--grep` 不只匹配属性名，也会搜索每个属性定义中的字符串元数据，并返回命中的属性名、路径和文本摘要。例如某些 schema 的属性名可能是 `title_differentiation`，但字段 `title` 才显示为 `Item Highlight`；此时 `--grep highlight` 也能找到它。找到后仍应使用 `--attribute <实际属性名>` 查看完整结构。
 
 两个进阶参数:
 - `--requirements-enforced`:默认 `NOT_ENFORCED`(适合改单个字段的局部 patch,不把完整提交的全部必填约束套上来);要检查完整提交时显式传 `ENFORCED`;
@@ -242,7 +244,7 @@ amz-cli listing schema --marketplace US --product-type ROTATING_TRAY --attribute
 **常见字段对照(最终以你的产品类型 schema 实际返回为准,不同类型可能不同)**:
 - 标题 = `item_name`
 - 五点/卖点 = `bullet_point`
-- 商品亮点(Item Highlights)按市场和产品类型逐步开放。字段名和结构只能以当前店铺、市场、产品类型的 schema 为准；先用 `--grep title` / `--grep highlight` 查找，不能把其他类型见过的字段名直接套用。Amazon 公告中的标题限制是 **≤75 字符**。
+- 商品亮点(Item Highlights)按市场和产品类型逐步开放。字段名和结构只能以当前店铺、市场、产品类型的 schema 为准；先用 `--grep title` / `--grep highlight` 搜索属性名和定义元数据，再用 `--attribute` 核对完整结构，不能把其他类型见过的字段名直接套用。Amazon 公告中的标题限制是 **≤75 字符**。
 
 ### listing update 🔒 — 编辑 listing
 
@@ -537,7 +539,9 @@ amz-cli ads test-account-status
 
 `preview_token` 只能使用一次，并绑定预览时的命令、全部业务参数、Feed/patch 文件内容哈希，以及当前 `BROKER_URL`、店铺、SP/Ads 区域、Client ID、凭证哈希；Listing 写操作还会绑定 Broker 实际返回的 Seller ID。敏感凭证明文不会写入令牌记录。缺少令牌、令牌过期、已经使用、确认命令改变业务参数、输入文件变化、运行环境或远端 Seller ID 映射切换，CLI 都会拒绝执行并要求重新预览。
 
-**普通非交互 Agent、n8n、管道带 `--confirm` 会被 CLI 拒绝**。Agent 的正确做法是运行 dry-run，把预览和带令牌的最终命令交给人。完整关键词广告若使用项目自带 MCP，可由 Cherry 的逐次工具审批替代 PowerShell TTY，但必须先调用 `prepare_keyword_campaign`，且不得自动批准 `launch_keyword_campaign` 或启用 `bypassPermissions`。
+**普通非交互 Agent、n8n、管道带 `--confirm` 会被 CLI 拒绝**。Agent 的正确做法是运行 dry-run，把预览和带令牌的最终命令交给人。若使用项目自带 MCP，Listing、Feed 和运营广告写操作可由对应的 `prepare_*` → Cherry 逐次审批 `apply_*` 替代 PowerShell TTY；完整关键词广告使用 `prepare_keyword_campaign` → `launch_keyword_campaign`。不得自动批准正式工具或启用 `bypassPermissions`，聊天中的“确认/Y”不能替代审批卡。
+
+MCP 正式写入还受 `AMZ_MCP_ALLOWED_WRITES` 操作白名单限制。预算、竞价和 Listing 预览会绑定当时的远端状态；执行前若已被其他人修改，旧令牌会被拒绝。Feed 提交只返回 `SUBMITTED` 和处理状态，必须等待 `DONE` 并检查结果文档；Listing 的 `ACCEPTED`/即时回读也不等于前台目录已经异步处理完成。
 
 安全边界说明：TTY、确认码和本地 preview token 主要防误操作，不能证明终端背后一定是真人，也不能阻止同权限恶意程序伪造本地状态或直接使用 Amazon bearer token。生产环境若要求“Agent 技术上绝不能写”，必须使用独立只读 Amazon 凭证，或由隔离的审批代理持有写凭证并代理写请求。
 

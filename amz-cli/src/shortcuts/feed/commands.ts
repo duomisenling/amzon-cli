@@ -147,8 +147,8 @@ export const feedSubmit: ToolDefinition = {
     return {
       dry_run_note:
         '仅完成本地 TSV 格式检查与内容预览，没有上传或提交到亚马逊；' +
-        '这不代表亚马逊已完成业务校验。真正提交请在 15 分钟内携带 meta.preview_token，' +
-        '由人工在终端执行(会要求输入确认码)',
+        '这不代表亚马逊已完成业务校验。请人工核对以下内容后，' +
+        '在 15 分钟内凭本次预览令牌执行正式提交(不可撤销操作,执行门槛最高)',
       marketplace: mkt.country,
       feedType: strFlag(ctx.flags, 'type'),
       file: strFlag(ctx.flags, 'file'),
@@ -174,9 +174,34 @@ export const feedSubmit: ToolDefinition = {
         inputFeedDocumentId: feedDocumentId,
       },
     })) as { feedId?: string };
-
+    if (!resp.feedId) {
+      throw new AmzError({
+        type: 'upstream_error',
+        subtype: 'feed.submit_result_unknown',
+        hintAgent: 'report_to_human',
+        hintHuman:
+          'Amazon 接受了 createFeed 请求但没有返回 feedId，无法判断提交结果。' +
+          '不要自动重试，请先到 Seller Central 核对 Feed 处理记录。',
+        message: `createFeed returned no feedId: ${JSON.stringify(resp)}`,
+      });
+    }
+    let immediateStatus: unknown;
+    let statusReadbackError: string | undefined;
+    try {
+      immediateStatus = await ctx.client.get(
+        `/feeds/2021-06-30/feeds/${encodeURIComponent(resp.feedId)}`,
+        undefined,
+        mkt.region,
+      );
+    } catch (error) {
+      statusReadbackError = error instanceof Error ? error.message : String(error);
+    }
     return {
       feedId: resp.feedId,
+      submissionStatus: 'SUBMITTED',
+      ...(immediateStatus !== undefined ? { immediateStatus } : {}),
+      ...(statusReadbackError ? { statusReadbackError } : {}),
+      note: 'SUBMITTED 只表示已创建 Feed；必须等待 processingStatus=DONE 并检查结果文档，才能确认各行是否成功。',
       next: `用 feed status --feed-id ${resp.feedId} 查处理进度;DONE 后用 feed result --feed-id ${resp.feedId} 看处理结果`,
     };
   },

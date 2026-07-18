@@ -73,6 +73,9 @@ test('MCP prepare performs no Amazon call and launch stays disabled by default',
     const prepared = await client.callTool({ name: 'prepare_keyword_campaign', arguments: { plan: plan() } });
     assert.equal(prepared.isError, undefined);
     assert.equal(clientsCreated, 0);
+    assert.equal(prepared.structuredContent.applyAllowed, false);
+    assert.match(prepared.structuredContent.applyBlockedReason, /AMZ_MCP_ALLOW_WRITES/);
+    assert.match(prepared.structuredContent.nextStep, /无法兑现/);
     const token = prepared.structuredContent.previewToken;
 
     const launched = await client.callTool({

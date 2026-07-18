@@ -23,11 +23,24 @@ amz-cli config path
 
 完整的 Cherry Studio、凭证、测试和更新步骤见[安装指南](docs/CHERRY_STUDIO_INSTALL.md)。
 
+### 由 Cherry Studio Agent 安装
+
+Cherry Studio 的技能库与 `npx skills` 的通用全局目录是两套登记机制。上面的安装命令会把同版本 Skill 安装到 `~/.agents/skills/amz-cli`，但仅看到这个文件夹，不代表 Skill 已经登记到 Cherry Studio。
+
+如果当前安装者是 Cherry Studio Agent，完成上面的命令后还必须：
+
+1. 使用 Cherry Studio **内置的 `skills` 工具**调用 `init`，参数为 `name=amz-cli`，取得 Cherry 全局技能目录。不要用外部命令 `npx skills` 代替这一步。
+2. 将 `~/.agents/skills/amz-cli/` 中的全部文件复制到 `init` 返回的目录，不修改文件内容。若目标目录已有来源不明的同名文件，停止并询问用户，不得直接覆盖。
+3. 确认目标目录包含 `SKILL.md`，再使用 Cherry 内置 `skills` 工具调用 `register`，参数为 `name=amz-cli`。
+4. 使用 Cherry 内置 `skills list` 确认 `amz-cli` 已登记并为当前 Agent 启用，然后新开当前 Agent 的会话验证。
+
+不得直接编辑 Cherry Studio 数据库。若当前 Agent 没有 Cherry 内置 `skills` 工具，应明确报告“CLI 和通用 Skill 已安装，但 Cherry 注册尚未完成”，再让用户到 Cherry 的 Skills 管理页面处理。Cherry 对技能采用按 Agent 启用：同一 Agent 的新会话可继续使用，换另一个 Agent 后需要在那个 Agent 中启用。
+
 ## AI Agent Skill
 
 仓库内置可安装的 Agent Skill：[`skills/amz-cli/SKILL.md`](skills/amz-cli/SKILL.md)。它提供命令地图、`--help` 自查、JSON 错误处理和写操作安全规则，不重复展开全部命令。
 
-正式安装器从 npm 全局包中安装同版本 Skill，避免 CLI 与操作说明漂移。Cherry Studio 中无需粘贴整份系统提示词；在 Agent 的“技能”页面确认 `amz-cli` 已启用，然后新开会话即可。
+正式安装器从 npm 全局包中安装同版本通用 Skill，避免 CLI 与操作说明漂移。Cherry Studio 还需要按上面的 `init` / `register` 流程登记到其技能库；登记后无需粘贴整份系统提示词，在 Agent 的“技能”页面确认 `amz-cli` 已启用并新开会话即可。
 
 源码开发者也可以从仓库安装 Skill：
 
@@ -74,8 +87,8 @@ src/
 - **stdout** 只输出成功结果 JSON:`{ok:true, data, meta?}`
 - **stderr** 输出进度与错误 JSON:`{ok:false, error:{type, subtype, hint_agent, hint_human, ...}}`
 - exit code 由错误 type 派生:参数错=2,凭证/权限=3,限流=4,上游=1,内部=5,需确认=10
-- 写操作必须 `--dry-run` 预览 → 人工确认 → `--confirm --preview-token <预览令牌>` 执行。令牌 15 分钟有效、只能使用一次，并且绑定命令、全部业务参数、Feed/patch 内容哈希以及当前店铺、Seller ID、区域和凭证环境；确认时任一项变化都会拒绝执行。
-- Cherry Studio 可选用 `amz-cli-mcp`：`prepare_keyword_campaign` 只预览，`launch_keyword_campaign` 必须保留逐次人工审批；MCP 写入默认关闭，且不得使用 `bypassPermissions` 或把正式创建工具设为自动批准。
+- 写操作必须 `--dry-run` 预览 → 人工确认 → `--confirm --preview-token <预览令牌>` 执行。令牌 15 分钟有效、只能使用一次，并且绑定命令、全部业务参数、Feed/patch 内容哈希、当前店铺、Seller ID、区域、凭证环境，以及 Listing/预算/竞价等预览所依据的远端当前状态；确认时任一项变化都会拒绝执行。
+- Cherry Studio 可选用 `amz-cli-mcp`：Listing、Feed 和运营广告写操作均提供 `prepare_*` 预览与 `apply_*` 正式执行工具；完整关键词广告沿用 `prepare_keyword_campaign` / `launch_keyword_campaign`。正式工具必须逐次人工审批，MCP 写入默认关闭并受 `AMZ_MCP_ALLOWED_WRITES` 白名单限制；不得使用 `bypassPermissions` 或自动批准。
 - 429 和安全的只读请求可自动退避重试；POST/PUT 写请求遇到 5xx 不自动重放，因为结果可能已经生效，必须先查询后台核对。
 - 网络请求都有截止时间：Broker/LWA 30 秒、普通 SP-API/Ads API 60 秒、文件上传下载 120 秒，防止进程永久卡住。
 - CLI 门禁用于防止误操作和普通非交互自动化，不是对同一电脑上恶意程序的强安全边界。若 Agent 能读取具写权限的 Amazon access token 或控制伪终端，必须依靠独立只读凭证或外部人工审批服务隔离。

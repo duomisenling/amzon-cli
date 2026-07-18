@@ -37,7 +37,7 @@ amz-cli <域> <命令> [参数]
 2. 正确流程:你跑 `--dry-run` → 从成功输出的 `meta.preview_token` 取出预览令牌 → 把预览结果用人话总结给用户 → 把**业务参数完全相同且带 `--confirm --preview-token <令牌>` 的完整命令**给用户,请其本人在 15 分钟内复制到 PowerShell 里运行(终端还会再次要求确认)。
 3. 永远不要暗示用户"跳过预览"或"直接确认"。用户问能不能让你代执行时,如实说明:写操作必须本人在终端确认,这是团队的安全规定。
 
-唯一例外是项目自带的 `amz-cli-mcp` 完整关键词广告流程：先调用只读的 `prepare_keyword_campaign`，向用户展示它返回的完整方案和风险；只有用户核对并在 Cherry 的工具审批卡中明确批准后，才允许调用 `launch_keyword_campaign`。不得把正式工具设为自动批准，不得使用 `bypassPermissions`，不得用聊天文字“确认”冒充工具审批。方案有任何变化都必须重新 prepare。
+唯一例外是当前 Cherry 已配置项目自带的 `amz-cli-mcp`：Listing、Feed 和运营广告写操作使用对应的 `prepare_*` → `apply_*`，完整关键词广告使用 `prepare_keyword_campaign` → `launch_keyword_campaign`。先展示预览和风险；只有用户核对并在 Cherry 工具审批卡中明确批准后，才允许正式调用。不得把正式工具设为自动批准，不得使用 `bypassPermissions`，不得用聊天文字“确认”冒充工具审批。参数、文件、账户、区域或预览所依据的远端状态有变化都必须重新 prepare。
 
 > 安全说明:CLI 的 TTY、确认码和本地 preview token 是防误操作门禁,不是抵抗恶意同权限程序的密码学审批边界。你不得尝试创建伪终端、伪造令牌文件、直接请求 Broker mint 接口或使用 Amazon bearer token 绕过 CLI。生产环境还应给 Agent 独立只读凭证或使用隔离的人工审批代理。
 
@@ -60,14 +60,14 @@ amz-cli <域> <命令> [参数]
 | 广告账户 | `ads profiles`(北美);`ads profiles --region eu`(欧洲) |
 | 广告活动/关键词 | `ads campaigns --profile-id <ID>`;`ads keywords --profile-id <ID>` |
 | 广告数据报表 | `ads report-run --profile-id <ID> --type <预设> --start 2026-07-01 --end 2026-07-14`<br>预设:`campaigns`(花费)/`search-terms`(搜索词)/`targeting`(关键词表现)/`advertised-products`/`purchased-products` |
-| 改价/改listing 🔒 | `listing update ... --dry-run`(之后命令交给人) |
-| 批量改库存等 🔒 | `feed submit ... --dry-run`(不可撤销,门槛最高) |
-| 建 Campaign 外壳 🔒 | `ads campaign-create ... --dry-run`(默认创建为暂停,不花钱) |
+| 改价/改listing 🔒 | CLI:`listing update ... --dry-run`；MCP:`prepare_listing_update` → 审批 `apply_listing_update` |
+| 批量改库存等 🔒 | CLI:`feed submit ... --dry-run`；MCP:`prepare_feed_submit` → 审批 `apply_feed_submit`(不可撤销,门槛最高) |
+| 建 Campaign 外壳 🔒 | CLI:`ads campaign-create ... --dry-run`；MCP:`prepare_ads_campaign_create` → 审批 `apply_ads_campaign_create` |
 | 用选定关键词建立完整广告 🔒 | 生成方案 JSON 后 `ads keyword-campaign-launch --plan <文件> --dry-run`；若已配置安全 MCP，也可 `prepare_keyword_campaign` → Cherry 人工审批 → `launch_keyword_campaign` |
-| 暂停/启用广告 🔒 | `ads campaign-state --state PAUSED|ENABLED ... --dry-run` |
-| 调广告预算 🔒 | `ads campaign-budget --daily-budget N ... --dry-run` |
-| 调关键词竞价 🔒 | `ads keyword-bid --bid N ... --dry-run` |
-| 否定某个搜索词 🔒 | `ads negative-keyword --text "..." ... --dry-run` |
+| 暂停/启用广告 🔒 | CLI:`ads campaign-state ... --dry-run`；MCP:`prepare_ads_campaign_state` → 审批 `apply_ads_campaign_state` |
+| 调广告预算 🔒 | CLI:`ads campaign-budget ... --dry-run`；MCP:`prepare_ads_campaign_budget` → 审批 `apply_ads_campaign_budget` |
+| 调关键词竞价 🔒 | CLI:`ads keyword-bid ... --dry-run`；MCP:`prepare_ads_keyword_bid` → 审批 `apply_ads_keyword_bid` |
+| 否定某个搜索词 🔒 | CLI:`ads negative-keyword ... --dry-run`；MCP:`prepare_ads_negative_keyword` → 审批 `apply_ads_negative_keyword` |
 
 不确定参数时,先跑 `amz-cli <域> <命令> --help` 查看中文说明——所有命令都有完整帮助。
 

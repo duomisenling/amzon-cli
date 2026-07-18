@@ -38,7 +38,12 @@ function tokenFile(token: string): string {
   return join(stateDir(), `${name}.json`);
 }
 
-function canonicalize(value: unknown): unknown {
+/**
+ * 归一化后再序列化,保证键序/undefined 差异不影响比较。
+ * 令牌指纹(本文件)与快照相等判断(tools/confirmation.ts)必须共用这一份实现:
+ * 两者一旦分叉,"是否发令牌"和"令牌是否验过"会对同一份数据得出不同结论。
+ */
+export function canonicalize(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(canonicalize);
   if (value && typeof value === 'object') {
     const sorted: Record<string, unknown> = {};
