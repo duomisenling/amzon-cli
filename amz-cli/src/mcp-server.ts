@@ -51,7 +51,7 @@ export interface AmazonMcpClientFactories extends ToolClientFactories {
 /** 可注入客户端，供无网络单元测试验证 MCP 数据流。 */
 export function createAmazonMcpServer(factories: AmazonMcpClientFactories = {}): McpServer {
   const server = new McpServer(
-    { name: 'amz-cli-safe-writes', version: '0.2.0' },
+    { name: 'amz-cli-safe-writes', version: '0.2.1' },
     {
       instructions:
         '所有 prepare_* 工具只预览；apply_* 和 launch_keyword_campaign 会正式写入 Amazon。' +
