@@ -161,28 +161,61 @@ SP_API_REGION=na
 
 普通查询、普通 CLI 命令和所有 `--dry-run` 都不依赖 MCP。只有希望实现“AI 展示预览 → 你在 Cherry 审批卡点允许 → Agent 正式执行并回查”时才配置。当前覆盖 Listing 修改、Feed 提交、广告活动创建/启停/预算、关键词竞价、否定关键词和完整关键词广告。
 
-查找全局 MCP 服务文件：
+> 重要：装了 amz-cli 的 Skill **不会**自动挂上 MCP。Skill 和 MCP 是两回事——Skill 让 Agent 知道有这个工具，MCP 写服务器必须在 Cherry 的“MCP 服务器”设置里**手动加一次**。加完还要在 Agent 里勾选、再新开会话。下面先给最省事的 JSON 一键导入。
 
-```powershell
-$npmRoot = npm root -g
-$mcpServer = Join-Path $npmRoot 'amz-cli\dist\mcp-server.js'
-$node = Get-Command node | Select-Object -ExpandProperty Source
-$node
-$mcpServer
-Test-Path $mcpServer
+### 方式 A（推荐）：JSON 一键导入
+
+1. 打开 Cherry Studio → 设置 → **MCP 服务器** → 找到 **从 JSON 导入**（有的版本叫“导入配置”/“编辑 JSON”）。
+2. 粘贴下面这段，保存：
+
+```json
+{
+  "mcpServers": {
+    "Amazon Safe Writes": {
+      "command": "npx",
+      "args": ["-y", "amz-cli-mcp"],
+      "env": {
+        "AMZ_MCP_ALLOW_WRITES": "true",
+        "AMZ_MCP_ALLOWED_WRITES": "listing.update,ads.campaign-create,ads.campaign-state,ads.campaign-budget,ads.keyword-bid,ads.negative-keyword,ads.keyword-campaign-launch"
+      }
+    }
+  }
+}
 ```
 
-在 Cherry Studio 的 MCP 服务器设置中新增 `stdio` 服务：
+`amz-cli-mcp` 是包里的 bin，npx 会自动定位全局装好的它，省去查 node 和脚本路径。
+
+3. 保存后若 Cherry 报“找不到 npx”，把 `"command": "npx"` 改成 `"command": "npx.cmd"` 再存（Windows 偶发）。
+4. 打开你的 **Agent 编辑页 → 工具 / MCP** 一栏 → **勾选 `Amazon Safe Writes`** → 保存。
+5. **新开一个会话**（旧会话的工具清单不会刷新）。
+6. 验证：在新会话里对 Agent 说“列出你可用的工具”，能看到 `prepare_listing_update`、`apply_ads_campaign_budget` 等 `prepare_*` / `apply_*` 工具，即挂载成功。
+
+### 方式 B：node + 脚本完整路径（方式 A 都不行时）
+
+先在那台机器的 PowerShell 里生成一段填好真实路径的 JSON，复制后按方式 A 第 1 步导入：
+
+```powershell
+$node = (Get-Command node).Source
+$srv = Join-Path (npm root -g) 'amz-cli\dist\mcp-server.js'
+Test-Path $srv   # 必须为 True；False 说明这台机器还没 npm install -g amz-cli
+@{ mcpServers = @{ 'Amazon Safe Writes' = @{ command = $node; args = @($srv); env = @{ AMZ_MCP_ALLOW_WRITES = 'true'; AMZ_MCP_ALLOWED_WRITES = 'listing.update,ads.campaign-create,ads.campaign-state,ads.campaign-budget,ads.keyword-bid,ads.negative-keyword,ads.keyword-campaign-launch' } } } } | ConvertTo-Json -Depth 5
+```
+
+若你的 Cherry 版本没有 JSON 导入入口，就手动新增一个 `stdio` 服务，逐项填：
 
 ```text
 名称: Amazon Safe Writes
 类型: stdio
 命令: 上面 $node 输出的完整路径
-参数: 上面 $mcpServer 输出的完整路径
+参数: 上面 $srv 输出的完整路径
 环境变量:
   AMZ_MCP_ALLOW_WRITES=true
   AMZ_MCP_ALLOWED_WRITES=listing.update,ads.campaign-create,ads.campaign-state,ads.campaign-budget,ads.keyword-bid,ads.negative-keyword,ads.keyword-campaign-launch
 ```
+
+无论方式 A 还是 B，最后都要回到 Agent 里勾选该 MCP、新开会话，并按上面第 6 步验证。
+
+### 白名单与凭证
 
 只有确实需要 Feed 批量提交的运营环境才在白名单追加 `feed.submit`。不要为了省事使用 `*`。白名单的取值语义：
 
@@ -220,6 +253,26 @@ MCP 工具采用成对设计：
 预览令牌 15 分钟有效且只能使用一次，并绑定业务参数、账号、区域、凭证环境、文件内容，以及 Listing/预算/竞价等操作预览时的远端当前状态。执行前状态有变化会拒绝旧令牌。Listing 正式提交后的即时回读可能仍是旧值；Feed 返回 `SUBMITTED`/队列状态后还必须等待 `DONE` 并读取结果文档，不能提前宣称全部成功。
 
 不配置 MCP 不影响 CLI 安全性；正式写执行仍可由本人在 PowerShell 中运行 `--confirm --preview-token ...`。
+
+### 上线前必查清单（每台配置了 MCP 写入的机器都要过一遍）
+
+`prepare_*` / `apply_*` 的“预览—审批”只是**看起来**安全；真正把关的是 Cherry 每次对 `apply_*` 弹审批卡、且人真的核对后才点。下面几条被破坏时，界面一切正常，但 Agent 调 `apply_*` 会直接写进亚马逊、无人复核——这是最隐蔽的风险，代码无法阻止，只能靠配置纪律：
+
+1. **Agent 权限模式为 `default`，绝不用 `bypassPermissions`。** 后者会让所有工具调用免审批。
+2. **所有 `apply_*` 和 `launch_keyword_campaign` 都不在“自动批准/白名单工具”列表里。** 它们必须每次弹卡、每次人点。
+3. **审批卡出现时人要真的核对**站点、账号、SKU、文件、预算、竞价、关键词、最终状态与预览是否一致；不一致就拒绝并让 Agent 重新 `prepare_*`。
+4. **聊天里的“确定/好/Y”不算数**，只有 Cherry 工具审批卡上的点击才算批准。
+5. **只给这台机器实际需要的操作**配 `AMZ_MCP_ALLOWED_WRITES`，不要用 `*`；不需要 Feed 就不要加 `feed.submit`。
+6. **写操作结果如实看**：Agent 报“已提交/待确认”而非“已生效”时，以只读命令或后台复核为准，不要凭一句话就当作前台已更新。
+
+第 1、2 条是这套机制的命门。只要有人为图省事把 `apply_*` 设成自动批准或开了 `bypassPermissions`，预览审批就形同虚设。
+
+### 挂载排查
+
+- **新会话里看不到 `prepare_*` / `apply_*` 工具**：多半是加了 MCP 但没在 Agent 里勾选，或勾了没新开会话。回到 Agent 编辑页确认已勾选 `Amazon Safe Writes`，保存后重开会话。
+- **Cherry 里这个 MCP 一直是红/连接失败**：命令或路径不对。方式 A 换 `npx.cmd`；方式 B 先 `Test-Path $srv` 确认脚本存在，为 False 说明这台机器还没 `npm install -g amz-cli`，先装包。
+- **工具能出现，但 `prepare_*` 一调就报凭证类错误**：这台机器缺 `.env`。MCP 默认读 `%USERPROFILE%\.amz-cli\.env`（同事机通常是 Broker 模式那份），按第三章配好凭证再试。
+- **`prepare_*` 返回 `applyAllowed: false`**：当前环境没放行对应的正式写入（写开关关闭或不在白名单），令牌无法兑现，别发起审批。核对该 MCP 的 `AMZ_MCP_ALLOW_WRITES` 和 `AMZ_MCP_ALLOWED_WRITES`。
 
 ## 六、分步测试
 
