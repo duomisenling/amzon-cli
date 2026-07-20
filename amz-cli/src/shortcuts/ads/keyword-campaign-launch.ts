@@ -527,6 +527,16 @@ export async function executeKeywordCampaignPlan(
       keywordCount: plan.keywords.length,
       state: plan.enableAfterCreate ? 'ENABLED' : 'PAUSED',
       journalStatus: journal.status,
+      // 暂停创建完成后,把"第二阶段开启"做成可操作指引:先列清再由用户单独决定是否开启。
+      ...(plan.enableAfterCreate
+        ? {}
+        : {
+            enabled: false,
+            next:
+              '整套广告已创建并保持【暂停】，不会产生花费。是否开启请作为独立第二步：' +
+              '先把已创建的活动/广告组/商品/每个关键词与竞价逐条列给用户、说明"开启后立即投放花钱"，' +
+              `确认后再单独启用：ads campaign-state --profile-id ${plan.profileId} --campaign-id ${journal.campaignId} --state ENABLED --dry-run`,
+          }),
     };
   } catch (error) {
     return markFailure(plan, journal, error);

@@ -148,6 +148,21 @@ test('full launch creates children while paused, verifies them, then enables las
   );
 });
 
+test('paused launch (enableAfterCreate=false) never enables and guides the separate enable step', async () => {
+  isolatedState();
+  const client = new SuccessfulAdsClient();
+  const parsed = parseKeywordCampaignPlan(JSON.stringify(plan({ enableAfterCreate: false })));
+  const result = await executeKeywordCampaignPlan(client, parsed);
+
+  assert.equal(result.state, 'PAUSED');
+  assert.equal(result.enabled, false);
+  // 第一阶段绝不启用:不能出现启用用的 PUT /sp/campaigns
+  assert.equal(client.calls.some(({ method, path }) => method === 'PUT' && path === '/sp/campaigns'), false);
+  // 返回要给出第二阶段开启指引(列清后单独启用)
+  assert.match(result.next, /campaign-state/);
+  assert.match(result.next, /开启后立即投放花钱|开启/);
+});
+
 test('HTTP 207-style partial keyword result is journaled and never enables the campaign', async () => {
   const stateDir = isolatedState();
   const client = new SuccessfulAdsClient();

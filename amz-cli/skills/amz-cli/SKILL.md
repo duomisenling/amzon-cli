@@ -104,7 +104,20 @@ Broker 模式下，`listing mine/sku/schema/update` 的 Seller ID 必须来自 B
 3. 给出业务参数完全相同的最终命令：`--confirm --preview-token <token>`。
 4. 要求用户本人在交互式 PowerShell 终端运行；CLI 会再次要求 `y` 或不可撤销 Feed 的随机确认码。
 
-`ads campaign-create` 仍只创建 Campaign 外壳。用户说“用这些关键词建广告”时，应使用 `ads keyword-campaign-launch`（MCP 通道对应 `prepare_keyword_campaign` → `launch_keyword_campaign`）：先确认 profile/区域、ASIN 或 SKU、预算、日期、竞价策略、广告组默认竞价、每个关键词的匹配方式与竞价，以及创建后是否启用；正式流程先建 PAUSED Campaign，所有子对象回读成功后才启用。
+**广告创建一律分两个阶段，绝不在创建那一步就开启投放（开启=开始花钱）：**
+
+`ads campaign-create` 只创建 Campaign 外壳；用户说“用这些关键词建广告”时用 `ads keyword-campaign-launch`（MCP 通道对应 `prepare_keyword_campaign` → `launch_keyword_campaign`）。
+
+**第一阶段——创建为暂停：**
+1. 先确认 profile/区域、ASIN 或 SKU（只给 ASIN 时按上面的 ASIN→SKU 规则解析）、日预算、日期、广告组默认竞价、每个关键词的匹配方式与竞价。
+2. 方案里 `enableAfterCreate` 一律设为 `false`（`campaign-create` 用 `state=PAUSED`）——**不要一步创建成启用**。
+3. 走完整逐项预览 + 审批卡批准后创建。创建成功后是【暂停】状态，不产生任何花费。
+
+**第二阶段——列清、说明、再问是否开启：**
+4. 创建成功后，把已创建的内容**完整再列一遍**：广告活动名称与日预算、广告组、投放的商品（ASIN/SKU）、以及每个关键词及其匹配方式与竞价。
+5. **逐条说明作用**，并明确告知“开启后广告立即开始投放并产生花费”。
+6. **主动询问用户：是否要开启（可以全部开启，也可以选择部分/暂不开启）。** 不要替用户决定，也不要默认帮他开。
+7. 用户明确要开启后，把“开启”作为**独立的第二次写操作**执行：对创建返回的 campaignId 走 `ads campaign-state --state ENABLED`（MCP 通道用 `prepare_ads_campaign_state` → `apply_ads_campaign_state`），同样要逐项预览 + 审批卡批准。
 
 MCP 正式写工具还受管理员配置的 `AMZ_MCP_ALLOWED_WRITES` 白名单限制；被拒绝时报告给管理员，不得自行扩大权限。
 
