@@ -18,6 +18,7 @@ import {
   adsRegion,
   assertAdsWriteAccepted,
   assertChangeNeeded,
+  recordFromContext,
   requireCampaignId,
   requireProfileId,
   verifyAfterWrite,
@@ -92,9 +93,7 @@ export const adsCampaignState: ToolDefinition = {
   },
   dryRun: async (ctx) => {
     const state = stateOf(ctx.flags);
-    const current = ctx.confirmationState && typeof ctx.confirmationState === 'object'
-      ? ctx.confirmationState as Record<string, unknown>
-      : undefined;
+    const current = recordFromContext(ctx.confirmationState);
     if (current) assertChangeNeeded(current['state'], state, '广告活动状态');
     return {
       dry_run_note: '以下为将提交的状态修改(客户端预览)。请人工核对;确认后凭本次预览令牌执行正式写入。',
@@ -108,23 +107,13 @@ export const adsCampaignState: ToolDefinition = {
   },
   execute: async (ctx) => {
     const state = stateOf(ctx.flags);
+    const profileId = strFlag(ctx.flags, 'profileId')!;
+    const campaignId = strFlag(ctx.flags, 'campaignId')!;
     ctx.progress(`· 正在${state === 'ENABLED' ? '启用' : '暂停'}广告活动...`);
-    const resp = await setCampaignState(
-      ctx.adsClient,
-      strFlag(ctx.flags, 'profileId')!,
-      strFlag(ctx.flags, 'campaignId')!,
-      state,
-      adsRegion(ctx.flags),
-    );
+    const resp = await setCampaignState(ctx.adsClient, profileId, campaignId, state, adsRegion(ctx.flags));
     assertAdsWriteAccepted(resp, 'campaigns', '状态修改');
     const verification = await verifyAfterWrite(
-      () =>
-        fetchCampaign(
-          ctx.adsClient,
-          strFlag(ctx.flags, 'profileId')!,
-          strFlag(ctx.flags, 'campaignId')!,
-          adsRegion(ctx.flags),
-        ),
+      () => fetchCampaign(ctx.adsClient, profileId, campaignId, adsRegion(ctx.flags)),
       (record) => record['state'] === state,
       '即时回读未确认目标状态。不要自动重试写入，请稍后只读查询或到广告后台核对。',
     );

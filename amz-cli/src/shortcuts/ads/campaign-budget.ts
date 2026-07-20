@@ -9,13 +9,14 @@
 
 import { AmzError } from '../../internal/errs/errors.js';
 import { AdsClient, ADS_CONTENT_TYPES } from '../../internal/client/ads-client.js';
-import type { ToolContext, ToolDefinition } from '../../tools/types.js';
+import type { ToolDefinition } from '../../tools/types.js';
 import { strFlag } from '../common.js';
 import {
   ADS_REGION_FLAG,
   adsRegion,
   assertAdsWriteAccepted,
   assertChangeNeeded,
+  recordFromContext,
   requireCampaignId,
   requirePositiveAmount,
   requireProfileId,
@@ -37,13 +38,6 @@ export async function fetchCampaign(
     body: { campaignIdFilter: { include: [campaignId] } },
   })) as { campaigns?: Array<Record<string, unknown>> } | null;
   return resp?.campaigns?.[0];
-}
-
-function campaignStateFromContext(ctx: ToolContext): Record<string, unknown> | undefined {
-  const value = ctx.confirmationState;
-  return value && typeof value === 'object' && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : undefined;
 }
 
 export const adsCampaignBudget: ToolDefinition = {
@@ -90,7 +84,7 @@ export const adsCampaignBudget: ToolDefinition = {
     const newBudget = requirePositiveAmount(ctx.flags, 'dailyBudget', '--daily-budget');
 
     ctx.progress('· 已查询当前预算做对照...');
-    const current = campaignStateFromContext(ctx);
+    const current = recordFromContext(ctx.confirmationState);
     if (!current) {
       throw new AmzError({
         type: 'invalid_param',

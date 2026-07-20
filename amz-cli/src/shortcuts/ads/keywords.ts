@@ -11,13 +11,14 @@
 
 import { AmzError } from '../../internal/errs/errors.js';
 import { AdsClient, ADS_CONTENT_TYPES } from '../../internal/client/ads-client.js';
-import type { ToolContext, ToolDefinition } from '../../tools/types.js';
+import type { ToolDefinition } from '../../tools/types.js';
 import { strFlag, validateNumberFlag } from '../common.js';
 import {
   ADS_REGION_FLAG,
   adsRegion,
   assertAdsWriteAccepted,
   assertChangeNeeded,
+  recordFromContext,
   requirePositiveAmount,
   requireProfileId,
   verifyAfterWrite,
@@ -37,13 +38,6 @@ export async function fetchKeyword(
     body: { keywordIdFilter: { include: [keywordId] } },
   })) as { keywords?: Array<Record<string, unknown>> } | null;
   return resp?.keywords?.[0];
-}
-
-function keywordStateFromContext(ctx: ToolContext): Record<string, unknown> | undefined {
-  const value = ctx.confirmationState;
-  return value && typeof value === 'object' && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : undefined;
 }
 
 // —— 读:列关键词 ——
@@ -138,7 +132,7 @@ export const adsKeywordBid: ToolDefinition = {
     const keywordId = strFlag(ctx.flags, 'keywordId')!;
 
     ctx.progress('· 已查询当前竞价做对照...');
-    const current = keywordStateFromContext(ctx);
+    const current = recordFromContext(ctx.confirmationState);
     if (!current) {
       throw new AmzError({
         type: 'invalid_param',
@@ -159,24 +153,19 @@ export const adsKeywordBid: ToolDefinition = {
   },
   execute: async (ctx) => {
     const profileId = requireProfileId(ctx.flags);
+    const keywordId = strFlag(ctx.flags, 'keywordId')!;
+    const newBid = requirePositiveAmount(ctx.flags, 'bid', '--bid');
     ctx.progress('· 正在修改关键词竞价...');
     const resp = await ctx.adsClient.request('PUT', '/sp/keywords', {
       profileId,
       region: adsRegion(ctx.flags),
       contentType: ADS_CONTENT_TYPES.spKeyword,
       body: {
-        keywords: [
-          {
-            keywordId: strFlag(ctx.flags, 'keywordId'),
-            bid: requirePositiveAmount(ctx.flags, 'bid', '--bid'),
-          },
-        ],
+        keywords: [{ keywordId, bid: newBid }],
       },
       extraHeaders: { Prefer: 'return=representation' },
     });
     assertAdsWriteAccepted(resp, 'keywords', '竞价修改');
-    const keywordId = strFlag(ctx.flags, 'keywordId')!;
-    const newBid = requirePositiveAmount(ctx.flags, 'bid', '--bid');
     const verification = await verifyAfterWrite(
       () => fetchKeyword(ctx.adsClient, profileId, keywordId, adsRegion(ctx.flags)),
       (record) => Number(record['bid']) === newBid,

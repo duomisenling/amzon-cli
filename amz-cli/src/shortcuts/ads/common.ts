@@ -98,8 +98,13 @@ export function requirePositiveAmount(
   return n;
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
+export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/** 把门禁预读的远端状态(ctx.confirmationState)取成对象,非对象返回 undefined。 */
+export function recordFromContext(value: unknown): Record<string, unknown> | undefined {
+  return isRecord(value) ? value : undefined;
 }
 
 export interface AdsMultistatusGroup {
