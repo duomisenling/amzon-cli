@@ -2,6 +2,8 @@
 
 给 AI Agent 用的亚马逊 SP-API 命令行工具(9 人运营团队内部使用)。
 
+**🗣️ 运营同事怎么跟 AI 助手开口:[docs/运营使用手册.md](docs/运营使用手册.md)**（不懂技术也能照着说，含查数据/改动审批的示范话术）
+
 **📖 完整命令使用手册:[docs/COMMANDS.md](docs/COMMANDS.md)**（命令示例、参数和注意事项，给运营同事与 Agent 使用）
 
 **🍒 Cherry Studio 安装与更新:[docs/CHERRY_STUDIO_INSTALL.md](docs/CHERRY_STUDIO_INSTALL.md)**
