@@ -140,3 +140,55 @@ test('a local account cannot inherit another account region tokens or Seller IDs
   assert.equal(env.LWA_CLIENT_ID, 'shared-client');
   assert.equal(env.LWA_CLIENT_SECRET, 'shared-secret');
 });
+
+test('auth whoami passes --region through to the SP-API client and reports it', async () => {
+  const { authWhoami } = await import('../dist/shortcuts/auth/whoami.js');
+  const calls = [];
+  const ctx = {
+    flags: { region: 'eu' },
+    progress() {},
+    client: {
+      async get(path, query, region) {
+        calls.push({ path, region });
+        return {
+          payload: [
+            {
+              marketplace: { id: 'A1PA6795UKMFR9', countryCode: 'DE', name: 'Amazon.de' },
+              participation: { isParticipating: true },
+            },
+          ],
+        };
+      },
+    },
+  };
+  const result = await authWhoami.execute(ctx);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].region, 'eu');
+  assert.equal(result.region, 'eu');
+  assert.equal(result.markets[0].country, 'DE');
+});
+
+test('auth whoami without --region queries the default region and says which one', async () => {
+  const { authWhoami } = await import('../dist/shortcuts/auth/whoami.js');
+  const saved = process.env.SP_API_REGION;
+  delete process.env.SP_API_REGION;
+  try {
+    const calls = [];
+    const ctx = {
+      flags: {},
+      progress() {},
+      client: {
+        async get(path, query, region) {
+          calls.push({ region });
+          return { payload: [] };
+        },
+      },
+    };
+    const result = await authWhoami.execute(ctx);
+    assert.equal(calls[0].region, undefined);
+    assert.equal(result.region, 'na');
+    assert.match(result.note, /--region/);
+  } finally {
+    if (saved !== undefined) process.env.SP_API_REGION = saved;
+  }
+});

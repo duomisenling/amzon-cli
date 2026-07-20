@@ -121,6 +121,38 @@ ADS_REGION=na
 
 本地凭证模式可以直接使用，但 Refresh Token 和 Client Secret 会保存在同事电脑。只适合经过授权的可信电脑和小范围试用；不要把你自己的完整 `.env` 原样分发给所有人。
 
+#### 本地模式部署给同事：一页纸清单
+
+暂不部署 Broker、只给 1–2 个可信同事本地使用时，照下面走。**管理员先做一次准备，同事只做三步。**
+
+**⚠️ 前提认知**：本地模式下 Refresh Token 是你 Amazon 账号的完整钥匙，会明文存在同事电脑上（项目设计上本应走 Broker，此为无服务器时的折中）。只发给完全信任的人；一旦离职、丢机或疑似泄露，立即去开发者中心吊销并重新授权 Refresh Token（多人共用同一份，吊销即一起失效）。
+
+**管理员一次性准备**：从开发者中心取 `LWA_CLIENT_ID` / `LWA_CLIENT_SECRET` / 对应区域的 `LWA_REFRESH_TOKEN_*`，从 Seller Central 取 `SELLER_ID_*`，按方案 A 的字段填成一份成品 `.env`（只填实际用到的区域，`ADS_*` 不用广告就留空，绝不要填 `BROKER_URL`/`TEAM_TOKEN`/`STORE`）。加密发给同事，密码走另一条渠道。
+
+**同事三步**：
+
+1. 装命令 + 注册 Skill（在自己的 PowerShell 里跑，不要交给 Agent 猜）：
+
+   ```powershell
+   npm install -g amz-cli@0.2.1
+   amz-cli install
+   ```
+
+2. 把管理员给的成品 `.env` 覆盖到（`amz-cli install` 已在此生成空模板）：
+
+   ```text
+   C:\Users\<同事的用户名>\.amz-cli\.env
+   ```
+
+3. 验证能跑通：
+
+   ```powershell
+   amz-cli sales stats --days 7           # 出数据即凭证通了
+   amz-cli listing mine --marketplace US  # 顺带验证 SELLER_ID
+   ```
+
+跑通后按第四章在 Cherry 的 Agent 里勾选 `amz-cli` Skill、新开会话即可做只读查询；**不需要设工作目录，也不需要拷仓库**。要用 Cherry 审批卡执行写操作，再按第五章挂 MCP（MCP 同样读这份 `~/.amz-cli/.env`）。多个店铺时，主店铺放这份 `.env`，其余每店一份放 `~/.amz-cli/accounts/<名称>.env`，用 `--account <名称>` 切换。
+
 ### 方案 B：Broker 模式
 
 同事电脑只保存下面四项，不保存 Amazon Refresh Token 或 Client Secret：

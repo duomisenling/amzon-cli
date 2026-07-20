@@ -154,10 +154,13 @@ amz-cli sales stats --account shop-b --marketplace US --days 7
 装好 CLI 后的第一条命令。凭证、网络、权限任何一环有问题,这里最先暴露。
 
 ```powershell
-amz-cli auth whoami
+amz-cli auth whoami                # 验证默认区域(SP_API_REGION,默认 na)
+amz-cli auth whoami --region eu    # 验证欧洲区域凭证(需已配置 LWA_REFRESH_TOKEN_EU)
 ```
 
-返回该账号参与的所有市场。`isSalesChannel: true` 的是真实销售站点,false 的是亚马逊内部市场(忽略即可)。
+返回该区域凭证参与的所有市场(结果里的 `region` 字段标明本次查询区域)。`isSalesChannel: true` 的是真实销售站点,false 的是亚马逊内部市场(忽略即可)。
+
+注意:SP-API 凭证**按区域隔离**——北美(US/CA/MX/BR)、欧洲(UK/DE/FR/IT/ES 等)、远东是三套独立的 refresh token。`whoami` 一次只验证一个区域;北美查不到欧盟站点是正常的,用 `--region eu` 单独验证。日常业务命令(sales/orders/listing 等)带 `--marketplace DE` 会自动路由到对应区域,无需手动切换。
 
 ### ads auth-url / auth-exchange — 广告授权(管理员一次性操作)
 

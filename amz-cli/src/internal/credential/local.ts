@@ -6,8 +6,10 @@
 //   LWA_REFRESH_TOKEN(兼容旧配置)= 默认区域(SP_API_REGION,默认 na)的 token
 // 查询命令按 --marketplace 自动路由区域;该区域没配 token 时给明确中文报错。
 //
-// 注意:此模式只应在开发者本机使用。发给运营同事的版本必须走 broker 模式
-// (同事电脑上永远不能出现 refresh_token —— 规格 §5.1)。
+// 部署建议:长期多人使用优先走 broker 模式(同事电脑不保存 refresh_token,
+// 吊销粒度到人 —— 规格 §5.1)。未部署 Broker 时,本地模式也可发给管理员授权的
+// 小范围可信同事:代价是 refresh_token 明文存在对方机器上,属于账号完整钥匙,
+// 离职/丢机/疑似泄露必须立即吊销并重新授权(多人共用一份 token,吊销即一起失效)。
 
 import { AmzError } from '../errs/errors.js';
 import {
