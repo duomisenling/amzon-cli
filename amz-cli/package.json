@@ -17,7 +17,7 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsx src/cli.ts",
-    "test": "npm run build && node --test tests/write-gate.test.mjs tests/broker.test.mjs tests/broker-server.test.mjs tests/preview-token.test.mjs tests/validation.test.mjs tests/retry-policy.test.mjs tests/report-sanitize.test.mjs tests/ads-pagination.test.mjs tests/ads-write.test.mjs tests/keyword-campaign-launch.test.mjs tests/mcp-server.test.mjs tests/mcp-operational-writes.test.mjs tests/account.test.mjs tests/setup.test.mjs tests/listing-update.test.mjs tests/listing-schema.test.mjs",
+    "test": "npm run build && node --test tests/write-gate.test.mjs tests/broker.test.mjs tests/broker-server.test.mjs tests/preview-token.test.mjs tests/validation.test.mjs tests/retry-policy.test.mjs tests/report-sanitize.test.mjs tests/ads-pagination.test.mjs tests/ads-write.test.mjs tests/keyword-campaign-launch.test.mjs tests/mcp-server.test.mjs tests/mcp-operational-writes.test.mjs tests/account.test.mjs tests/setup.test.mjs tests/listing-update.test.mjs tests/listing-schema.test.mjs tests/listing-mine.test.mjs",
     "typecheck": "tsc --noEmit",
     "prepack": "npm run build",
     "prepublishOnly": "npm test"

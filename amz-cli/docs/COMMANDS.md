@@ -211,7 +211,11 @@ amz-cli listing get --marketplace US --asin B0XXXXXXXX --include summaries,image
 amz-cli listing mine --marketplace US
 # 只看有问题的 listing
 amz-cli listing mine --marketplace US --with-issue-severity ERROR
+# 只有 ASIN、想找本店铺对应的 SKU(编辑 listing / 建广告前常用)
+amz-cli listing mine --marketplace DE --asin B0H2TYPC26
 ```
+
+`--asin` 按 ASIN 精确查本店铺对应的 SKU,返回里的 `matchedSkus` 直接给出命中的 SKU;`--skus` 和 `--asin` 二选一。一个 ASIN 可能对应多个 SKU,写操作前要据此确认改哪一个。
 
 需要卖家编号。本地凭证模式在 `.env` 配置 `SELLER_ID=...`(或每次传 `--seller-id`)；Broker 模式必须由管理员配置服务端 `SELLER_ID_<店铺>_<区域>`，本地 flag/env 不作为兜底。
 

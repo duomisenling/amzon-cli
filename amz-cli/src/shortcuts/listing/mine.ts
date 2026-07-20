@@ -116,6 +116,10 @@ export const listingMine: ToolDefinition = {
     SELLER_ID_FLAG,
     { name: 'skus', desc: '按 SKU 精确查,逗号分隔,最多 20 个(可选)' },
     {
+      name: 'asin',
+      desc: '按 ASIN 精确查本店铺对应的 SKU,逗号分隔最多 20 个(可选;用于"只有 ASIN、想找自己 SKU"的场景);不能与 --skus 同时用',
+    },
+    {
       name: 'with-issue-severity',
       desc: '只看有问题的 listing,按严重度过滤(可选值:ERROR | WARNING)',
       enum: ['ERROR', 'WARNING'],
@@ -126,26 +130,46 @@ export const listingMine: ToolDefinition = {
   validate: (flags) => {
     validateNumberFlag(flags, 'pageSize', '--page-size', { min: 1, max: 20, integer: true });
     const skus = strFlag(flags, 'skus')?.split(',').map((s) => s.trim()).filter(Boolean);
-    if (skus && (skus.length < 1 || skus.length > 20)) {
+    const asins = strFlag(flags, 'asin')?.split(',').map((s) => s.trim()).filter(Boolean);
+    if (skus && asins) {
       throw new AmzError({
-        type: 'invalid_param', subtype: 'invalid_sku_count', param: '--skus', hintAgent: 'fix_param',
-        hintHuman: '--skus 一次必须提供 1 到 20 个 SKU。', message: `--skus count must be 1-20, got ${skus.length}`,
+        type: 'invalid_param', subtype: 'conflicting_identifiers', param: '--skus/--asin', hintAgent: 'fix_param',
+        hintHuman: '--skus 和 --asin 不能同时使用,请二选一。', message: '--skus and --asin are mutually exclusive',
       });
+    }
+    for (const [values, flag] of [[skus, '--skus'], [asins, '--asin']] as const) {
+      if (values && (values.length < 1 || values.length > 20)) {
+        throw new AmzError({
+          type: 'invalid_param', subtype: 'invalid_identifier_count', param: flag, hintAgent: 'fix_param',
+          hintHuman: `${flag} 一次必须提供 1 到 20 个值。`, message: `${flag} count must be 1-20, got ${values.length}`,
+        });
+      }
     }
   },
   execute: async (ctx) => {
     const mkt = resolveMarketplace(ctx.flags['marketplace']);
     const sellerId = await resolveSellerId(ctx.flags, mkt.region, ctx.client);
     const skus = strFlag(ctx.flags, 'skus');
+    const asins = strFlag(ctx.flags, 'asin');
+    // --skus 与 --asin 互斥(validate 已保证),按提供的那个选 identifiersType
+    const identifierQuery = skus
+      ? { identifiers: skus, identifiersType: 'SKU' }
+      : asins
+        ? { identifiers: asins, identifiersType: 'ASIN' }
+        : {};
 
-    ctx.progress(`· 正在列出本店铺在 ${mkt.country} 的 listing...`);
+    ctx.progress(
+      asins
+        ? `· 正在按 ASIN 查本店铺在 ${mkt.country} 对应的 SKU...`
+        : `· 正在列出本店铺在 ${mkt.country} 的 listing...`,
+    );
 
     const resp = (await ctx.client.get(
       `/listings/2021-08-01/items/${encodeURIComponent(sellerId)}`,
       {
         marketplaceIds: mkt.id,
         includedData: 'summaries,issues',
-        ...(skus ? { identifiers: skus, identifiersType: 'SKU' } : {}),
+        ...identifierQuery,
         ...(strFlag(ctx.flags, 'withIssueSeverity')
           ? { withIssueSeverity: strFlag(ctx.flags, 'withIssueSeverity') }
           : {}),
@@ -159,10 +183,13 @@ export const listingMine: ToolDefinition = {
       items?: Array<Record<string, unknown>>;
     };
 
+    const items = resp.items ?? [];
     return {
       marketplace: mkt.country,
       numberOfResults: resp.numberOfResults ?? 0,
-      items: resp.items ?? [],
+      items,
+      // 按 ASIN 查时,直接把命中的本店铺 SKU 提出来,方便"ASIN→我的 SKU"确认
+      ...(asins ? { matchedSkus: items.map((it) => it['sku']).filter(Boolean) } : {}),
       ...(resp.pagination?.nextToken ? { nextToken: resp.pagination.nextToken } : {}),
     };
   },
