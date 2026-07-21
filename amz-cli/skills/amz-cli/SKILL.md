@@ -89,6 +89,12 @@ Broker 模式下，`listing mine/sku/schema/update` 的 Seller ID 必须来自 B
 
 绝不把"从 ASIN 推断 SKU"塞进写操作内部自动完成——写操作只接受明确的 SKU，且这个 SKU 必须在预览/审批卡里被用户看到。
 
+**写操作/建广告执行前，先查一次商品 listing 做落地确认（既拿到 SKU，也确认商品真在自己店铺里）：**
+
+- 建广告或改 Listing 前，用 `listing mine --marketplace <站点> --asin <ASIN>`（或 `--skus <SKU>`）确认这个商品**确实在本店铺该站点的目录里**。查不到就停下，告诉用户"这个商品不在你 XX 站点的在售 listing 里"，让他核对站点或商品，不要硬建。
+- 需要看具体字段/当前值时，再用 `listing sku --marketplace <站点> --sku <SKU> --include ...` 拉商品详情，用于"逐项列清 当前值 → 新值"。
+- 这样即便用户只给了 ASIN，也能先落到明确的 SKU 和真实商品上，再进入预览与审批，避免对不存在或不属于本店铺的商品下写操作。
+
 **A. MCP 通道（工具清单里有 `prepare_*` 时——优先）**
 
 1. 调对应的 `prepare_*` 工具（不是 `--dry-run` 命令），读回预览：当前值 → 改动、issues、`previewToken`、`applyAllowed`。
