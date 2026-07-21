@@ -117,7 +117,11 @@ Broker 模式下，`listing mine/sku/schema/update` 的 Seller ID 必须来自 B
 `ads campaign-create` 只创建 Campaign 外壳；用户说“用这些关键词建广告”时用 `ads keyword-campaign-launch`（MCP 通道对应 `prepare_keyword_campaign` → `launch_keyword_campaign`）。
 
 **第一阶段——创建为暂停：**
-1. 先确认 profile/区域、ASIN 或 SKU（只给 ASIN 时按上面的 ASIN→SKU 规则解析）、日预算、日期、广告组默认竞价、每个关键词的匹配方式与竞价。
+1. 先确认 profile/区域、商品、日预算、日期、广告组默认竞价、每个关键词的匹配方式与竞价。
+   - **一个活动支持多个商品**：用户给多个 ASIN/SKU（如同一商品的几个变体）时，全部放进方案的 `products` 数组（1–20 个，每个仍是 asin/sku 二选一），不要说"只支持一个"，也不要替用户拆成多个活动；用户明确要分开投放时才拆。
+   - 把多个 ASIN 转成 `products` 数组是你的工作，不要求用户提供 JSON 或数组。
+   - 只给 ASIN 时按上面的 ASIN→SKU 规则先解析确认商品在店铺里。
+   - 同时告知：同一广告组内的所有商品**共享同一套关键词和竞价**；预览时把每个商品逐个列出让用户核对。
 2. 方案里 `enableAfterCreate` 一律设为 `false`（`campaign-create` 用 `state=PAUSED`）——**不要一步创建成启用**。
 3. 走完整逐项预览 + 审批卡批准后创建。创建成功后是【暂停】状态，不产生任何花费。
 
