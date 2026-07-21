@@ -95,6 +95,8 @@ Broker 模式下，`listing mine/sku/schema/update` 的 Seller ID 必须来自 B
 - 需要看具体字段/当前值时，再用 `listing sku --marketplace <站点> --sku <SKU> --include ...` 拉商品详情，用于"逐项列清 当前值 → 新值"。
 - 这样即便用户只给了 ASIN，也能先落到明确的 SKU 和真实商品上，再进入预览与审批，避免对不存在或不属于本店铺的商品下写操作。
 
+**加否定关键词（negative-keyword）前，先确认广告组身份，别只对着裸 ID 下手：** 该操作按 `campaignId` + `adGroupId` 定位，预览默认只显示这两串数字。执行前先用 `ads keywords --profile-id <ID> --campaign-id <活动ID>` 列出该活动的关键词与广告组，确认 `adGroupId` 对应的是哪个广告组，并在报给用户时带上**活动/广告组的人话名称**（不是只有数字），避免把否定词下到错误的广告组。
+
 **A. MCP 通道（工具清单里有 `prepare_*` 时——优先）**
 
 1. 调对应的 `prepare_*` 工具（不是 `--dry-run` 命令），读回预览：当前值 → 改动、issues、`previewToken`、`applyAllowed`。
