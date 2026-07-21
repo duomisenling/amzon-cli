@@ -13,9 +13,14 @@
     "name": "Core keywords",
     "defaultBid": 0.8
   },
-  "product": {
-    "asin": "B012345678"
-  },
+  "products": [
+    {
+      "asin": "B012345678"
+    },
+    {
+      "asin": "B012345679"
+    }
+  ],
   "keywords": [
     {
       "text": "example exact keyword",

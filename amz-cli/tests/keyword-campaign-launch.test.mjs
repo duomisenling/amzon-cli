@@ -60,7 +60,14 @@ class SuccessfulAdsClient {
       return { adGroups: { error: [], success: [{ index: 0, adGroupId: '2001' }] } };
     }
     if (method === 'POST' && path === '/sp/productAds') {
-      return { productAds: { error: [], success: [{ index: 0, adId: '3001' }] } };
+      // 动态按请求条数生成 adId,并记住完整内容供 list 回读(支持多商品)
+      this.createdAds ??= [];
+      const success = opts.body.productAds.map((ad, index) => {
+        const adId = String(3001 + this.createdAds.length);
+        this.createdAds.push({ ...ad, adId });
+        return { index, adId };
+      });
+      return { productAds: { error: [], success } };
     }
     if (method === 'POST' && path === '/sp/keywords') {
       return {
@@ -80,9 +87,11 @@ class SuccessfulAdsClient {
       return { adGroups: [{ campaignId: '1001', adGroupId: '2001', state: 'ENABLED' }] };
     }
     if (method === 'POST' && path === '/sp/productAds/list') {
-      return {
-        productAds: [{ campaignId: '1001', adGroupId: '2001', adId: '3001', asin: 'B012345678', state: 'ENABLED' }],
-      };
+      const include = opts.body.adIdFilter.include.map(String);
+      const known = this.createdAds ?? [
+        { campaignId: '1001', adGroupId: '2001', adId: '3001', asin: 'B012345678', state: 'ENABLED' },
+      ];
+      return { productAds: known.filter((ad) => include.includes(String(ad.adId))) };
     }
     if (method === 'POST' && path === '/sp/keywords/list') {
       return {
@@ -238,4 +247,75 @@ test('ambiguous write result blocks automatic resume instead of replaying create
     (error) => error instanceof AmzError && error.subtype === 'ads.keyword_campaign_reconcile_required',
   );
   assert.equal(second.calls.length, 0);
+});
+
+test('legacy single-product plans still parse into a products array', () => {
+  const parsed = parseKeywordCampaignPlan(JSON.stringify(plan()));
+  assert.equal(parsed.products.length, 1);
+  assert.equal(parsed.products[0].asin, 'B012345678');
+  assert.equal(parsed.product, undefined);
+});
+
+test('duplicate products in a plan are rejected locally', () => {
+  const p = plan({ products: [{ asin: 'B012345678' }, { asin: 'B012345678' }] });
+  delete p.product;
+  assert.throws(() => parseKeywordCampaignPlan(JSON.stringify(p)), /duplicate product/);
+});
+
+test('multi-product plan creates all product ads in one call and verifies each one', async () => {
+  isolatedState();
+  const client = new SuccessfulAdsClient();
+  const p = plan({
+    products: [
+      { asin: 'B012345678' },
+      { asin: 'B012345679' },
+      { sku: 'VARIANT-SKU-3' },
+      { asin: 'B012345680' },
+    ],
+  });
+  delete p.product;
+  const parsed = parseKeywordCampaignPlan(JSON.stringify(p));
+
+  const preview = keywordCampaignPreview(parsed);
+  assert.equal(preview.productCount, 4);
+  assert.equal(preview.products[2].sku, 'VARIANT-SKU-3');
+
+  const result = await executeKeywordCampaignPlan(client, parsed);
+  const createCalls = client.calls.filter(({ method, path }) => method === 'POST' && path === '/sp/productAds');
+  assert.equal(createCalls.length, 1, 'all product ads must be created in a single array call');
+  assert.equal(createCalls[0].opts.body.productAds.length, 4);
+  assert.equal(result.productCount, 4);
+  assert.equal(Object.keys(result.adIds).length, 4);
+  assert.equal(result.state, 'ENABLED');
+});
+
+test('partial product-ad failure journals progress and resume submits only the missing product', async () => {
+  isolatedState();
+  const p = plan({ products: [{ asin: 'B012345678' }, { asin: 'B012345679' }] });
+  delete p.product;
+  const parsed = parseKeywordCampaignPlan(JSON.stringify(p));
+
+  const first = new SuccessfulAdsClient();
+  first.request = async function (method, path, opts) {
+    if (method === 'POST' && path === '/sp/productAds') {
+      this.calls.push({ method, path, opts });
+      this.createdAds = [{ ...opts.body.productAds[0], adId: '3001' }];
+      return { productAds: { success: [{ index: 0, adId: '3001' }], error: [{ index: 1, code: 'BAD_PRODUCT' }] } };
+    }
+    return SuccessfulAdsClient.prototype.request.call(this, method, path, opts);
+  };
+  await assert.rejects(
+    executeKeywordCampaignPlan(first, parsed),
+    (error) => error instanceof AmzError && error.subtype === 'ads.keyword_campaign_partial_failure',
+  );
+
+  const resumed = new SuccessfulAdsClient();
+  resumed.createdAds = [...first.createdAds];
+  const result = await executeKeywordCampaignPlan(resumed, parsed);
+  const createCall = resumed.calls.find(({ method, path }) => method === 'POST' && path === '/sp/productAds');
+  assert.equal(createCall.opts.body.productAds.length, 1, 'resume must only create the missing product ad');
+  assert.equal(createCall.opts.body.productAds[0].asin, 'B012345679');
+  assert.equal(resumed.calls.some(({ method, path }) => method === 'POST' && path === '/sp/campaigns'), false);
+  assert.equal(Object.keys(result.adIds).length, 2);
+  assert.equal(result.state, 'ENABLED');
 });

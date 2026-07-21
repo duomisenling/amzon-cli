@@ -25,7 +25,30 @@ const keywordSchema = z.object({
   bid: positiveMoney,
 });
 
-export const keywordCampaignPlanSchema = z
+const productSchema = z
+  .object({
+    asin: z.string().trim().toUpperCase().regex(/^[A-Z0-9]{10}$/).optional(),
+    sku: z.string().trim().min(1).optional(),
+  })
+  .superRefine((value, ctx) => {
+    if (Boolean(value.asin) === Boolean(value.sku)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'provide exactly one of asin or sku' });
+    }
+  });
+
+/** 兼容旧方案:单个 product 归一为 products 数组,业务代码只处理数组一种形态。 */
+function normalizeLegacyProduct(value: unknown): unknown {
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    const record = value as Record<string, unknown>;
+    if (record['products'] === undefined && record['product'] !== undefined) {
+      const { product, ...rest } = record;
+      return { ...rest, products: [product] };
+    }
+  }
+  return value;
+}
+
+const keywordCampaignPlanObject = z
   .object({
     version: z.literal(1),
     launchId: z.string().regex(/^[A-Za-z0-9_-]{8,64}$/),
@@ -42,16 +65,9 @@ export const keywordCampaignPlanSchema = z
       name: z.string().trim().min(1).max(128),
       defaultBid: positiveMoney,
     }),
-    product: z
-      .object({
-        asin: z.string().trim().toUpperCase().regex(/^[A-Z0-9]{10}$/).optional(),
-        sku: z.string().trim().min(1).optional(),
-      })
-      .superRefine((value, ctx) => {
-        if (Boolean(value.asin) === Boolean(value.sku)) {
-          ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'provide exactly one of asin or sku' });
-        }
-      }),
+    // 官方 POST /sp/productAds 本就接收数组;同一广告组的多商品(如变体)共享
+    // 关键词与竞价。上限 20 是"预览必须可人工核对"的保守值,远低于接口上限。
+    products: z.array(productSchema).min(1).max(20),
     keywords: z.array(keywordSchema).min(1).max(1000),
     enableAfterCreate: z.boolean(),
   })
@@ -77,9 +93,19 @@ export const keywordCampaignPlanSchema = z
       }
       seen.add(key);
     });
+    const seenProducts = new Set<string>();
+    plan.products.forEach((product, index) => {
+      const key = product.asin ? `asin:${product.asin}` : `sku:${product.sku}`;
+      if (seenProducts.has(key)) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['products', index], message: 'duplicate product' });
+      }
+      seenProducts.add(key);
+    });
   });
 
-export type KeywordCampaignPlan = z.infer<typeof keywordCampaignPlanSchema>;
+export const keywordCampaignPlanSchema = z.preprocess(normalizeLegacyProduct, keywordCampaignPlanObject);
+
+export type KeywordCampaignPlan = z.infer<typeof keywordCampaignPlanObject>;
 
 type LaunchStatus =
   | 'PLANNED'
@@ -100,7 +126,9 @@ interface LaunchJournal {
   status: LaunchStatus;
   campaignId?: string;
   adGroupId?: string;
-  adId?: string;
+  /** 商品广告:方案 products 下标 → adId(多商品与关键词同构,支持断点续传) */
+  adIds: Record<string, string>;
+  completedProductIndexes: number[];
   keywordIds: Record<string, string>;
   completedKeywordIndexes: number[];
   lastError?: unknown;
@@ -197,6 +225,8 @@ function newJournal(plan: KeywordCampaignPlan): LaunchJournal {
     launchId: plan.launchId,
     planHash: keywordCampaignPlanHash(plan),
     status: 'PLANNED',
+    adIds: {},
+    completedProductIndexes: [],
     keywordIds: {},
     completedKeywordIndexes: [],
     updatedAt: new Date().toISOString(),
@@ -215,6 +245,9 @@ function loadJournal(plan: KeywordCampaignPlan): LaunchJournal {
   if (journal.version !== 1 || journal.launchId !== plan.launchId || journal.planHash !== keywordCampaignPlanHash(plan)) {
     throw invalidPlan('launchId 已被另一份不同内容的方案使用，请更换 launchId 并重新 dry-run');
   }
+  // 多商品字段是后加的;防御性补默认值(旧单商品日志会先被上面的 planHash 拦下)
+  journal.adIds ??= {};
+  journal.completedProductIndexes ??= [];
   return journal;
 }
 
@@ -297,7 +330,8 @@ export function keywordCampaignPreview(plan: KeywordCampaignPlan): Record<string
     region: plan.region,
     campaign: campaignPayload(plan),
     adGroup: { name: plan.adGroup.name, defaultBid: plan.adGroup.defaultBid, state: 'ENABLED' },
-    product: { ...plan.product, state: 'ENABLED' },
+    products: plan.products.map((product) => ({ ...product, state: 'ENABLED' })),
+    productCount: plan.products.length,
     keywords: plan.keywords.map((keyword) => ({ ...keyword, state: 'ENABLED' })),
     keywordCount: plan.keywords.length,
     finalState: plan.enableAfterCreate ? 'ENABLED（仅在全部回查成功后）' : 'PAUSED',
@@ -319,11 +353,12 @@ async function verifyCreatedObjects(client: AdsClient, plan: KeywordCampaignPlan
     retry5xx: true,
     body: { adGroupIdFilter: { include: [journal.adGroupId] }, maxResults: 1 },
   })) as { adGroups?: Array<Record<string, unknown>> } | null;
+  const adIdEntries = Object.entries(journal.adIds);
   const productAdResponse = (await client.request('POST', '/sp/productAds/list', {
     ...common,
     contentType: ADS_CONTENT_TYPES.spProductAd,
     retry5xx: true,
-    body: { adIdFilter: { include: [journal.adId] }, maxResults: 1 },
+    body: { adIdFilter: { include: adIdEntries.map(([, adId]) => adId) }, maxResults: adIdEntries.length },
   })) as { productAds?: Array<Record<string, unknown>> } | null;
 
   const keywordIds = Object.values(journal.keywordIds);
@@ -350,8 +385,24 @@ async function verifyCreatedObjects(client: AdsClient, plan: KeywordCampaignPlan
 
   const campaign = campaignResponse?.campaigns?.[0];
   const adGroup = adGroupResponse?.adGroups?.[0];
-  const productAd = productAdResponse?.productAds?.[0];
-  const expectedProduct = plan.product.asin ?? plan.product.sku;
+  // 逐条核对每个商品广告:adId 落在本 campaign/adGroup 下,且 asin/sku 与方案同下标商品一致
+  const adsById = new Map(
+    (productAdResponse?.productAds ?? []).map((ad) => [String(ad['adId']), ad]),
+  );
+  let verifiedProducts = 0;
+  for (const [indexKey, adId] of adIdEntries) {
+    const ad = adsById.get(String(adId));
+    const product = plan.products[Number(indexKey)];
+    if (
+      ad &&
+      product &&
+      String(ad['campaignId']) === journal.campaignId &&
+      String(ad['adGroupId']) === journal.adGroupId &&
+      String(ad[product.asin ? 'asin' : 'sku']) === (product.asin ?? product.sku)
+    ) {
+      verifiedProducts += 1;
+    }
+  }
   const counts = {
     campaigns:
       campaign && String(campaign['campaignId']) === journal.campaignId && campaign['state'] === 'PAUSED' ? 1 : 0,
@@ -361,17 +412,15 @@ async function verifyCreatedObjects(client: AdsClient, plan: KeywordCampaignPlan
       String(adGroup['campaignId']) === journal.campaignId
         ? 1
         : 0,
-    productAds:
-      productAd &&
-      String(productAd['adId']) === journal.adId &&
-      String(productAd['campaignId']) === journal.campaignId &&
-      String(productAd['adGroupId']) === journal.adGroupId &&
-      String(productAd[plan.product.asin ? 'asin' : 'sku']) === expectedProduct
-        ? 1
-        : 0,
+    productAds: verifiedProducts,
     keywords: verifiedKeywordIds.size,
   };
-  if (counts.campaigns !== 1 || counts.adGroups !== 1 || counts.productAds !== 1 || counts.keywords !== plan.keywords.length) {
+  if (
+    counts.campaigns !== 1 ||
+    counts.adGroups !== 1 ||
+    counts.productAds !== plan.products.length ||
+    counts.keywords !== plan.keywords.length
+  ) {
     throw partialFailure('回读验证', counts, counts.keywords, plan.keywords.length);
   }
 }
@@ -439,23 +488,40 @@ export async function executeKeywordCampaignPlan(
       }
     }
 
-    if (!journal.adId) {
-      progress('· [3/6] 创建商品广告...');
+    const completedProducts = new Set(journal.completedProductIndexes);
+    const pendingProducts = plan.products
+      .map((product, index) => ({ product, index }))
+      .filter(({ index }) => !completedProducts.has(index));
+    if (pendingProducts.length) {
+      progress(`· [3/6] 创建 ${pendingProducts.length}/${plan.products.length} 条商品广告...`);
       const response = await client.request('POST', '/sp/productAds', {
         ...requestOptions,
         contentType: ADS_CONTENT_TYPES.spProductAd,
-        body: { productAds: [{ campaignId: journal.campaignId, adGroupId: journal.adGroupId, ...plan.product, state: 'ENABLED' }] },
+        body: {
+          productAds: pendingProducts.map(({ product }) => ({
+            campaignId: journal.campaignId,
+            adGroupId: journal.adGroupId,
+            ...product,
+            state: 'ENABLED',
+          })),
+        },
         extraHeaders: { Prefer: 'return=representation' },
       });
       const result = responseGroup(response, 'productAds');
-      const id = result.success[0] && idFrom(result.success[0], 'adId', 'productAdId');
-      if (id) {
-        journal.adId = id;
-        journal.status = 'PRODUCT_AD_CREATED';
-        saveJournal(plan, journal);
+      for (const item of result.success) {
+        const localIndex = Number(item['index']);
+        const original = pendingProducts[localIndex];
+        const id = idFrom(item, 'adId', 'productAdId');
+        if (original && id) {
+          completedProducts.add(original.index);
+          journal.adIds[String(original.index)] = id;
+        }
       }
-      if (result.error.length || result.success.length !== 1 || !id) {
-        throw partialFailure('创建商品广告', result.error, result.success.length, 1);
+      journal.completedProductIndexes = [...completedProducts].sort((a, b) => a - b);
+      if (completedProducts.size) journal.status = 'PRODUCT_AD_CREATED';
+      saveJournal(plan, journal);
+      if (result.error.length || completedProducts.size !== plan.products.length) {
+        throw partialFailure('创建商品广告', result.error, completedProducts.size, plan.products.length);
       }
     }
 
@@ -522,7 +588,8 @@ export async function executeKeywordCampaignPlan(
       launchId: plan.launchId,
       campaignId: journal.campaignId,
       adGroupId: journal.adGroupId,
-      adId: journal.adId,
+      adIds: journal.adIds,
+      productCount: plan.products.length,
       keywordIds: journal.keywordIds,
       keywordCount: plan.keywords.length,
       state: plan.enableAfterCreate ? 'ENABLED' : 'PAUSED',
@@ -559,7 +626,10 @@ export const adsKeywordCampaignLaunch: ToolDefinition = {
   },
   describe: (flags) => {
     const plan = readPlanFile(flags).plan;
-    return `在 profile ${plan.profileId}/${plan.region} 创建“${plan.campaign.name}”，商品 ${plan.product.asin ?? plan.product.sku}，` +
+    const labels = plan.products.map((product) => product.asin ?? product.sku);
+    const productSummary =
+      labels.length <= 3 ? labels.join('、') : `${labels.slice(0, 3).join('、')} 等 ${labels.length} 个`;
+    return `在 profile ${plan.profileId}/${plan.region} 创建“${plan.campaign.name}”，商品 ${productSummary}，` +
       `${plan.keywords.length} 个关键词，日预算 ${plan.campaign.dailyBudget}，最终${plan.enableAfterCreate ? '启用并开始投放' : '保持暂停'}`;
   },
   confirmationInput: (flags) => {

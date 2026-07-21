@@ -511,7 +511,7 @@ amz-cli ads negative-keyword ... --confirm --preview-token <preview_token>
 
 典型广告优化循环:`report-run --type search-terms` 找废词 → `negative-keyword` 否掉 / `keyword-bid` 降竞价 / `campaign-budget` 给表现好的加预算。
 
-完整关键词广告方案格式见 `examples/keyword-campaign-plan.example.json`。`launchId` 必须是本次发布的唯一编号；方案要求 1–1000 个关键词，同一关键词文本与匹配方式不能重复。`product` 中 `asin` 和 `sku` 必须二选一。`enableAfterCreate=true` 并不表示一创建 Campaign 就花钱：执行顺序固定为 PAUSED Campaign → 广告组 → 商品广告 → 分批创建关键词 → 回读核对 ID/归属/数量 → 最后启用。
+完整关键词广告方案格式见 `examples/keyword-campaign-plan.example.json`。`launchId` 必须是本次发布的唯一编号；方案要求 1–1000 个关键词，同一关键词文本与匹配方式不能重复。`products` 是商品数组（1–20 个，如同一商品的多个变体），每个商品的 `asin` 和 `sku` 必须二选一、不能重复；同一广告组内的所有商品共享同一套关键词与竞价。旧格式的单个 `product` 对象仍然兼容（自动视为一个商品的 `products`）。`enableAfterCreate=true` 并不表示一创建 Campaign 就花钱：执行顺序固定为 PAUSED Campaign → 广告组 → 全部商品广告（一次数组调用）→ 分批创建关键词 → 逐条回读核对 ID/归属/数量 → 最后启用。
 
 Amazon Ads 批量创建可能返回 `207 Multi-Status`。CLI 会逐项读取 `success/error`：部分失败时保留已成功 ID、Campaign 保持暂停；同一方案再次确认后只补缺项。写请求网络超时或结果不明确时不会自动重放，而是要求先到后台或用只读命令核对。
 
