@@ -1,6 +1,6 @@
 {
   "name": "amz-cli",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "description": "Amazon SP-API CLI for AI Agents — 给 Agent 用的亚马逊命令行工具",
   "type": "module",
   "files": [
