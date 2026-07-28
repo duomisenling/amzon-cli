@@ -65,10 +65,19 @@ const REPORT_PRESETS: Record<
   },
 };
 
-async function createReport(ctx: ToolContext, profileId: string): Promise<string> {
+export interface AdsReportConfig {
+  reportTypeId: string;
+  groupBy: string[];
+  columns: string[];
+  start: string;
+  end: string;
+  desc?: string;
+}
+
+/** 从 flag 组装报表配置(供 ads report-run 用)。 */
+function adsConfigFromFlags(ctx: ToolContext): AdsReportConfig {
   const start = requireDate(ctx.flags, 'start', '--start');
   const end = requireDate(ctx.flags, 'end', '--end');
-
   const typeFlag = (strFlag(ctx.flags, 'type') ?? 'campaigns').trim();
   const preset = REPORT_PRESETS[typeFlag.toLowerCase()];
   const reportTypeId = preset?.reportTypeId ?? typeFlag;
@@ -78,21 +87,24 @@ async function createReport(ctx: ToolContext, profileId: string): Promise<string
   const groupBy = (strFlag(ctx.flags, 'groupBy') ?? preset?.groupBy ?? 'campaign,adGroup')
     .split(',')
     .map((s) => s.trim());
+  return { reportTypeId, groupBy, columns, start, end, desc: preset?.desc };
+}
 
-  ctx.progress(`· 正在创建广告报表(${preset ? preset.desc : reportTypeId},${start} ~ ${end})...`);
+async function createReport(ctx: ToolContext, profileId: string, cfg: AdsReportConfig): Promise<string> {
+  ctx.progress(`· 正在创建广告报表(${cfg.desc ?? cfg.reportTypeId},${cfg.start} ~ ${cfg.end})...`);
   const resp = (await ctx.adsClient.request('POST', '/reporting/reports', {
     profileId,
     region: adsRegion(ctx.flags),
     contentType: ADS_CONTENT_TYPES.createReport,
     body: {
-      name: `amz-cli report ${start}~${end}`,
-      startDate: start,
-      endDate: end,
+      name: `amz-cli report ${cfg.start}~${cfg.end}`,
+      startDate: cfg.start,
+      endDate: cfg.end,
       configuration: {
         adProduct: 'SPONSORED_PRODUCTS',
-        groupBy,
-        columns,
-        reportTypeId,
+        groupBy: cfg.groupBy,
+        columns: cfg.columns,
+        reportTypeId: cfg.reportTypeId,
         timeUnit: 'DAILY',
         format: 'GZIP_JSON',
       },
@@ -109,6 +121,38 @@ async function createReport(ctx: ToolContext, profileId: string): Promise<string
     });
   }
   return resp.reportId;
+}
+
+/**
+ * 一条龙拉广告报表并返回解析后的行数组(创建 → 轮询 → 下载 → JSON.parse)。
+ * 供聚合类命令(如 ads wasted-spend)复用;拿不到下载地址时抛类型化错误。
+ */
+export async function fetchAdsReportRows(
+  ctx: ToolContext,
+  profileId: string,
+  cfg: AdsReportConfig,
+  timeoutMin: number,
+): Promise<Array<Record<string, unknown>>> {
+  const reportId = await createReport(ctx, profileId, cfg);
+  const status = await waitForAdsReport(ctx, profileId, reportId, timeoutMin);
+  const url = typeof status['url'] === 'string' ? (status['url'] as string) : undefined;
+  if (!url) {
+    throw new AmzError({
+      type: 'upstream_error',
+      subtype: 'ads.report_no_url',
+      hintAgent: 'report_to_human',
+      hintHuman: '广告报表已完成但响应里没有下载地址,请稍后重试或用 ads report-status 查看原始响应。',
+      message: `ads report ${reportId} completed without url: ${JSON.stringify(status).slice(0, 500)}`,
+    });
+  }
+  ctx.progress('· 报表已生成,正在下载解析...');
+  const buf = await fetchDocumentBuffer(url, {
+    gzip: true,
+    what: '广告报表',
+    subtype: 'ads.report_download_failed',
+  });
+  const parsed = JSON.parse(buf.toString('utf8')) as unknown;
+  return Array.isArray(parsed) ? (parsed as Array<Record<string, unknown>>) : [];
 }
 
 async function getReportStatus(
@@ -231,7 +275,7 @@ export const adsReportRun: ToolDefinition = {
   },
   execute: async (ctx) => {
     const profileId = requireProfileId(ctx.flags);
-    const reportId = await createReport(ctx, profileId);
+    const reportId = await createReport(ctx, profileId, adsConfigFromFlags(ctx));
     const timeoutMin = Number(strFlag(ctx.flags, 'timeout') ?? 10);
     const status = await waitForAdsReport(ctx, profileId, reportId, timeoutMin);
     return downloadAdsReport(ctx, reportId, status);

@@ -28,7 +28,7 @@ export async function requestReport(
   ctx: ToolContext,
   reportType: string,
   marketplace: MarketplaceInfo,
-  opts: { dataStartTime?: string; dataEndTime?: string } = {},
+  opts: { dataStartTime?: string; dataEndTime?: string; reportOptions?: Record<string, string> } = {},
 ): Promise<string> {
   ctx.progress(`· 正在请求报告 ${reportType}(${marketplace.country})...`);
   const resp = (await ctx.client.request('POST', '/reports/2021-06-30/reports', {
@@ -38,6 +38,7 @@ export async function requestReport(
       marketplaceIds: [marketplace.id],
       ...(opts.dataStartTime ? { dataStartTime: opts.dataStartTime } : {}),
       ...(opts.dataEndTime ? { dataEndTime: opts.dataEndTime } : {}),
+      ...(opts.reportOptions ? { reportOptions: opts.reportOptions } : {}),
     },
   })) as { reportId?: string };
   if (!resp.reportId) {
@@ -136,6 +137,32 @@ export interface ParsedReport {
   rows?: Array<Record<string, string>>;
   rowCount?: number;
   rawText?: string;
+}
+
+/**
+ * 一条龙:发起报告 → 等待生成 → 下载 → 解析成 {headers, rows}。
+ * 供聚合类只读命令(库龄/滞留/退货等)复用,把"跑报告拿表格行"收成一次调用。
+ */
+export async function runReportRows(
+  ctx: ToolContext,
+  reportType: string,
+  marketplace: MarketplaceInfo,
+  opts: {
+    dataStartTime?: string;
+    dataEndTime?: string;
+    reportOptions?: Record<string, string>;
+    timeoutMinutes?: number;
+    maxRows?: number;
+  } = {},
+): Promise<ParsedReport> {
+  const reportId = await requestReport(ctx, reportType, marketplace, {
+    dataStartTime: opts.dataStartTime,
+    dataEndTime: opts.dataEndTime,
+    reportOptions: opts.reportOptions,
+  });
+  const status = await waitForReport(ctx, reportId, opts.timeoutMinutes ?? 10, marketplace.region);
+  const text = await downloadReportDocument(ctx, status.reportDocumentId!, marketplace.region);
+  return parseReport(text, opts.maxRows ?? 100_000);
 }
 
 /** 下载报告文档并解析(处理 GZIP;flat file 报告按 TSV 解析,失败则原样返回)。 */

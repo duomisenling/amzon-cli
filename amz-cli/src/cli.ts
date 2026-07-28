@@ -33,6 +33,7 @@ import { listingUpdate } from './shortcuts/listing/update.js';
 import { feedSubmit, feedStatus, feedResult } from './shortcuts/feed/commands.js';
 import { adsProfiles, adsCampaigns } from './shortcuts/ads/commands.js';
 import { adsReportRun, adsReportStatus } from './shortcuts/ads/report.js';
+import { adsWastedSpend } from './shortcuts/ads/wasted-spend.js';
 import { adsCampaignCreate } from './shortcuts/ads/campaign-create.js';
 import { adsCampaignExtend } from './shortcuts/ads/campaign-extend.js';
 import { adsKeywordCampaignLaunch } from './shortcuts/ads/keyword-campaign-launch.js';
@@ -43,6 +44,13 @@ import { adsTestAccountCreate, adsTestAccountStatus } from './shortcuts/ads/test
 import { adsAuthUrl, adsAuthExchange } from './shortcuts/ads/auth.js';
 import { salesStats } from './shortcuts/sales/stats.js';
 import { inventoryList } from './shortcuts/inventory/list.js';
+import { restockCandidates } from './shortcuts/inventory/restock-candidates.js';
+import { inventoryAged } from './shortcuts/inventory/aged.js';
+import { inventoryStranded } from './shortcuts/inventory/stranded.js';
+import { inventoryLowStock } from './shortcuts/inventory/low-stock.js';
+import { inventorySlowMoving } from './shortcuts/inventory/slow-moving.js';
+import { returnsBySku } from './shortcuts/returns/by-sku.js';
+import { reimbursementsList } from './shortcuts/reimbursements/list.js';
 import { feesEstimate } from './shortcuts/fees/estimate.js';
 import { shipmentsList, shipmentsItems } from './shortcuts/shipments/list.js';
 
@@ -84,6 +92,13 @@ async function main(): Promise<void> {
     ordersItems,
     salesStats,
     inventoryList,
+    restockCandidates,
+    inventoryAged,
+    inventoryStranded,
+    inventoryLowStock,
+    inventorySlowMoving,
+    returnsBySku,
+    reimbursementsList,
     feesEstimate,
     shipmentsList,
     shipmentsItems,
@@ -105,6 +120,7 @@ async function main(): Promise<void> {
     adsCampaigns,
     adsReportRun,
     adsReportStatus,
+    adsWastedSpend,
     // —— 广告写操作(dry-run/confirm 门槛;首次验证走测试账户=广告沙盒)——
     adsCampaignCreate,
     adsCampaignExtend,

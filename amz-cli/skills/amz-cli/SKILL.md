@@ -14,6 +14,14 @@ description: 使用 amz-cli 安全查询和运营 Amazon 卖家店铺。适用�
 | 用户意图 | 首选命令 |
 |---|---|
 | 单个 ASIN/SKU 或全店的销售额、销量、日报 | `sales stats`（单品带 `--asin` 或 `--sku`） |
+| 哪些**以前好卖、现在断货/库存告急要补货**的品 | `inventory restock-candidates`（一步合并库存与近 N 天销量，别手动拼） |
+| 哪些品**快断货了、该补货**（还有货但撑不了几天） | `inventory low-stock`（默认可售天数≤14，按紧急度升序） |
+| 最近**亚马逊赔了多少钱**、什么原因 | `reimbursements list`（默认最近 30 天，合计+按原因/SKU 拆分） |
+| 哪些货**库龄老、要清货**（在仓放太久，对应 ERP 库龄档） | `inventory aged`（按库龄天数筛，默认>90天，列出 0~30/31~60/… 各档明细） |
+| 哪些是**滞留库存**（有货但 listing 失效卖不出去） | `inventory stranded` |
+| 哪些是**周转慢/压货**（货能卖但可售天数过长，卖得慢） | `inventory slow-moving`（默认可售天数>90天，按可售天数降序） |
+| 最近**哪些品退货多**、主要退货原因 | `returns by-sku`（默认最近 30 天，按 SKU 汇总退货量/笔数/主因） |
+| **哪些搜索词白花钱**（点击多、0 订单，要加否定词） | `ads wasted-spend`（默认点击≥10、0 转化；结果可直接喂 `ads negative-keyword`） |
 | 订单、单笔订单、商品明细 | `orders list/get/items` |
 | FBA 库存 | `inventory list` |
 | FBA 货件和收货差异 | `shipments list/items` |
@@ -26,6 +34,15 @@ description: 使用 amz-cli 安全查询和运营 Amazon 卖家店铺。适用�
 | 广告账户、活动、关键词、报表 | `ads profiles/campaigns/keywords/report-run` |
 | 用已经选好的关键词建立完整 SP 广告 | `ads keyword-campaign-launch`（JSON 方案；先 dry-run） |
 | 向已有 SP 广告活动/广告组追加商品或正向关键词 | `ads campaign-extend`（JSON 方案；先 dry-run） |
+
+## 效率红线（减少无效调用）
+
+一次自然语言查询要用尽量少的命令收敛；以下行为纯属浪费调用，禁止：
+
+- **不要开场连查一串 `--help`。** 上面的命令选择表已给出首选命令，意图和参数明确时直接运行。只有真的不确定某个参数含义时才对**那一个命令**查一次 `--help`；不要把 amz-cli、子命令、参数逐层帮助全翻一遍再动手。
+- **绝不探测或安装 Python**（`which python`、`python --version`、找可用解释器）。amz-cli 不依赖 Python，这类调用对本工具毫无意义。需要对大报告做筛选/聚合时，用 Node 一次性处理，不要先探测环境。
+- **本店销量/销售数据只来自 `sales stats` 或 `report run`。** 绝不用 sorftime、OPS、`ops_get_*` 等第三方接口当本店销量源——它们返回的是第三方市场估算，不是本店真实销量，用了就是错。判断“以前好卖 / 卖得好不好”必须基于本店自己的销量数据。
+- **翻页要一次翻完。** 复用同一命令加 `--next-token <值>` 连续翻页；分页 token 只在短时间内有效，不要拖到过期再从头重拉。
 
 ## 意图判定与追问
 
@@ -46,6 +63,7 @@ description: 使用 amz-cli 安全查询和运营 Amazon 卖家店铺。适用�
 - “做个销售报告”，无法判断是单品、全店汇总还是导出文件：询问需要哪一种。
 - 明确说“ASIN B0... 最近 30 天销量”：直接用 `sales stats --asin ... --days 30`，不要创建全店报告。
 - 明确说“最近 7 天全店经营情况”：直接用不带 ASIN/SKU 的 `sales stats`。
+- 问“哪些以前好卖的品断货了 / 哪些要补货”：直接用 `inventory restock-candidates`（默认看最近 30 天销量、彻底断货的品；想含低库存加 `--stock-threshold`）。这条命令已在服务端合并库存与销量，**不要**自己逐页翻库存、再单独跑销售报告、再手动按 ASIN 对——那正是过去一句话炸几十个调用的根源。
 - 明确说“导出、全量、全店明细、报表文件”：再使用 `report run`。Reports API 的 ASIN 筛选不是通用能力，不要自行添加不存在的参数。
 - 问“某个 ASIN 的差评”：先说明 `feedback run` 是全店卖家反馈，不能按 ASIN 过滤，再确认是否仍要查全店反馈；不要把卖家反馈说成商品评价。
 
