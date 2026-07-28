@@ -12,8 +12,8 @@
 //      + Amazon-Advertising-API-Scope(profileId,除 /v2/profiles 外都要带)
 //
 // 凭证环境变量:ADS_CLIENT_ID / ADS_CLIENT_SECRET / ADS_REFRESH_TOKEN /
-//   ADS_REGION(默认 na)。未配置时回退尝试 LWA_*(便于验证 SP-API 凭证
-//   是否恰好有广告权限——通常没有,会得到明确的 401/403)。
+//   ADS_REGION(默认 na)。广告凭证不回退到 SP-API 的 LWA_*，避免多店铺下
+//   混用不同应用或把没有广告权限的 SP-API 凭证误当成广告凭证。
 
 import { AmzError } from '../errs/errors.js';
 import { progress } from '../errs/output.js';
@@ -45,13 +45,9 @@ interface AdsCreds {
 }
 
 function resolveAdsCreds(): AdsCreds {
-  const clientId = (process.env['ADS_CLIENT_ID'] ?? process.env['LWA_CLIENT_ID'] ?? '').trim();
-  const clientSecret = (
-    process.env['ADS_CLIENT_SECRET'] ?? process.env['LWA_CLIENT_SECRET'] ?? ''
-  ).trim();
-  const refreshToken = (
-    process.env['ADS_REFRESH_TOKEN'] ?? process.env['LWA_REFRESH_TOKEN'] ?? ''
-  ).trim();
+  const clientId = (process.env['ADS_CLIENT_ID'] ?? '').trim();
+  const clientSecret = (process.env['ADS_CLIENT_SECRET'] ?? '').trim();
+  const refreshToken = (process.env['ADS_REFRESH_TOKEN'] ?? '').trim();
   const region = (process.env['ADS_REGION'] ?? 'na').trim().toLowerCase();
 
   if (!clientId || !clientSecret || !refreshToken) {

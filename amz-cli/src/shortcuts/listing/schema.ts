@@ -32,9 +32,24 @@ interface ProductTypeDefinition {
   schema?: { link?: { resource?: string }; checksum?: string };
 }
 
-interface JsonSchema {
+export interface JsonSchema {
   properties?: Record<string, unknown>;
   required?: string[];
+}
+
+export interface LoadedListingSchema {
+  sellerId: string;
+  productType: string;
+  displayName?: string;
+  marketplace: string;
+  marketplaceId: string;
+  region: string;
+  version?: string;
+  locale?: string;
+  requirementsEnforced: string;
+  parentageLevel?: string;
+  checksum: string;
+  schema: JsonSchema;
 }
 
 interface SchemaTextMatch {
@@ -159,6 +174,78 @@ function parseSchema(buf: Buffer): JsonSchema {
     });
   }
   return parsed as JsonSchema;
+}
+
+/**
+ * Load the latest seller-specific Product Type Definition used by both the
+ * read-only schema command and the listing write gate.
+ */
+export async function loadListingSchema(
+  ctx: Parameters<ToolDefinition['execute']>[0],
+): Promise<LoadedListingSchema> {
+  const mkt = resolveMarketplace(ctx.flags['marketplace']);
+  const requestedProductType = strFlag(ctx.flags, 'productType')!;
+  const sellerId = await resolveSellerId(ctx.flags, mkt.region, ctx.client);
+  const requirementsEnforced = strFlag(ctx.flags, 'requirementsEnforced') ?? 'NOT_ENFORCED';
+  const parentageLevel = strFlag(ctx.flags, 'parentageLevel');
+
+  ctx.progress(`· 正在获取 ${requestedProductType} 的卖家专属 schema（${mkt.country}，最新版本）...`);
+  const def = (await ctx.client.get(
+    `/definitions/2020-09-01/productTypes/${encodeURIComponent(requestedProductType)}`,
+    {
+      marketplaceIds: mkt.id,
+      sellerId,
+      productTypeVersion: 'LATEST',
+      requirements: 'LISTING',
+      requirementsEnforced,
+      ...(parentageLevel ? { parentageLevel } : {}),
+    },
+    mkt.region,
+  )) as ProductTypeDefinition;
+
+  const schemaUrl = def.schema?.link?.resource;
+  if (!schemaUrl) {
+    throw new AmzError({
+      type: 'upstream_error',
+      subtype: 'schema.no_link',
+      hintAgent: 'report_to_human',
+      hintHuman: 'Amazon 没有返回 schema 下载地址，请稍后重试。',
+      message: `getDefinitionsProductType returned no schema link: ${JSON.stringify(def).slice(0, 300)}`,
+    });
+  }
+  const checksum = def.schema?.checksum?.trim();
+  if (!checksum) {
+    throw new AmzError({
+      type: 'upstream_error',
+      subtype: 'schema.no_checksum',
+      hintAgent: 'report_to_human',
+      hintHuman: 'Amazon 没有返回 schema 校验值，无法确认下载内容完整性，请稍后重试。',
+      message: 'getDefinitionsProductType returned no schema checksum',
+    });
+  }
+
+  ctx.progress('· 正在下载 schema 内容（预签名地址）...');
+  const buf = await fetchDocumentBuffer(schemaUrl, {
+    gzip: false,
+    what: '产品类型 schema',
+    subtype: 'schema.download_failed',
+  });
+  verifySchemaChecksum(buf, checksum);
+
+  return {
+    sellerId,
+    productType: def.productType ?? requestedProductType,
+    ...(def.displayName ? { displayName: def.displayName } : {}),
+    marketplace: mkt.country,
+    marketplaceId: mkt.id,
+    region: mkt.region,
+    ...(def.productTypeVersion?.version ? { version: def.productTypeVersion.version } : {}),
+    ...(def.locale ? { locale: def.locale } : {}),
+    requirementsEnforced: def.requirementsEnforced ?? requirementsEnforced,
+    ...(parentageLevel ? { parentageLevel } : {}),
+    checksum,
+    schema: parseSchema(buf),
+  };
 }
 
 export const listingSchema: ToolDefinition = {

@@ -134,8 +134,7 @@ ADS_REGION=na
 1. 装命令 + 注册 Skill（在自己的 PowerShell 里跑，不要交给 Agent 猜）：
 
    ```powershell
-   npm install -g amz-cli@0.2.1
-   amz-cli install
+   npx amz-cli@latest install
    ```
 
 2. 把管理员给的成品 `.env` 覆盖到（`amz-cli install` 已在此生成空模板）：
@@ -147,11 +146,11 @@ ADS_REGION=na
 3. 验证能跑通：
 
    ```powershell
-   amz-cli sales stats --days 7           # 出数据即凭证通了
+   amz-cli sales stats --marketplace US --days 7  # 出数据即凭证通了
    amz-cli listing mine --marketplace US  # 顺带验证 SELLER_ID
    ```
 
-跑通后按第四章在 Cherry 的 Agent 里勾选 `amz-cli` Skill、新开会话即可做只读查询；**不需要设工作目录，也不需要拷仓库**。要用 Cherry 审批卡执行写操作，再按第五章挂 MCP（MCP 同样读这份 `~/.amz-cli/.env`）。多个店铺时，主店铺放这份 `.env`，其余每店一份放 `~/.amz-cli/accounts/<名称>.env`，用 `--account <名称>` 切换。
+跑通后按第四章在 Cherry 的 Agent 里勾选 `amz-cli` Skill、新开会话即可做只读查询；**不需要设工作目录，也不需要拷仓库**。要用 Cherry 审批卡执行写操作，再按第五章挂 MCP。多个店铺时，每店一份放 `~/.amz-cli/accounts/<名称>.env`，用 `--account <名称>` 切换；主 `.env` 可只放共享的 Client ID/Secret。多店铺写入推荐使用合并 MCP，并且每次由工具的必填 `account` 明确选店，不使用无名称默认店铺。
 
 ### 方案 B：Broker 模式
 
@@ -191,58 +190,58 @@ SP_API_REGION=na
 
 ## 五、可选：安全写操作 MCP
 
-普通查询、普通 CLI 命令和所有 `--dry-run` 都不依赖 MCP。只有希望实现“AI 展示预览 → 你在 Cherry 审批卡点允许 → Agent 正式执行并回查”时才配置。当前覆盖 Listing 修改、Feed 提交、广告活动创建/启停/预算、关键词竞价、否定关键词和完整关键词广告。
+普通查询、普通 CLI 命令和所有 `--dry-run` 都不依赖 MCP。只有希望实现“AI 展示预览 → 你在 Cherry 审批卡点允许 → Agent 正式执行并回查”时才配置。当前覆盖 Listing 修改、Feed 提交、广告活动创建/扩展/启停/预算、关键词竞价、否定关键词和完整关键词广告。
 
 > 重要：装了 amz-cli 的 Skill **不会**自动挂上 MCP。Skill 和 MCP 是两回事——Skill 让 Agent 知道有这个工具，MCP 写服务器必须在 Cherry 的“MCP 服务器”设置里**手动加一次**。加完还要在 Agent 里勾选、再新开会话。下面先给最省事的 JSON 一键导入。
 
-### 方式 A（推荐）：JSON 一键导入
+### 方式 A（推荐）：管理员生成一次便携多店铺 MCP，同事直接导入
 
-1. 打开 Cherry Studio → 设置 → **MCP 服务器** → 找到 **从 JSON 导入**（有的版本叫“导入配置”/“编辑 JSON”）。
-2. 粘贴下面这段，保存：
+不要手写 `npx amz-cli-mcp`：`amz-cli-mcp` 是 `amz-cli` npm 包里的 bin，不是独立包名。`--portable` 会生成 Windows 便携配置，通过系统 PATH 启动全局安装的 `amz-cli-mcp`，不写入管理员电脑的 Node、用户名或项目绝对路径，也不读取或输出任何 Amazon 凭证。
 
-```json
-{
-  "mcpServers": {
-    "Amazon Safe Writes": {
-      "command": "npx",
-      "args": ["-y", "amz-cli-mcp"],
-      "env": {
-        "AMZ_MCP_ALLOW_WRITES": "true",
-        "AMZ_MCP_ALLOWED_WRITES": "listing.update,ads.campaign-create,ads.campaign-state,ads.campaign-budget,ads.keyword-bid,ads.negative-keyword,ads.keyword-campaign-launch"
-      }
-    }
-  }
-}
+1. 管理员和同事电脑都先安装**同一版本**的 `amz-cli`。安装完成后重启 Cherry Studio，让它读取新的 PATH。
+2. 确认每台同事电脑都有五个命名账号凭证文件：`~/.amz-cli/accounts/shop-a.env`、`shop-b.env`、`shop-c.env`、`shop-d.env`、`shop-e.env`。
+3. 管理员只需在自己的 PowerShell 生成一次便携 JSON（输出文件已存在时会安全拒绝，不会覆盖）：
+
+```powershell
+amz-cli config mcp --combined --portable --accounts shop-a,shop-b,shop-c,shop-d,shop-e --output "$env:USERPROFILE\amz-cli-mcp.json"
 ```
 
-`amz-cli-mcp` 是包里的 bin，npx 会自动定位全局装好的它，省去查 node 和脚本路径。
+合并模式不允许 `--include-default`。便携 JSON 可以发给所有 Windows 同事使用，但它不包含 MCP 程序和 Amazon 凭证；没有安装 `amz-cli` 或没有账号文件时，单独导入 JSON 无法运行。
 
-3. 保存后若 Cherry 报“找不到 npx”，把 `"command": "npx"` 改成 `"command": "npx.cmd"` 再存（Windows 偶发）。
-4. 打开你的 **Agent 编辑页 → 工具 / MCP** 一栏 → **勾选 `Amazon Safe Writes`** → 保存。
-5. **新开一个会话**（旧会话的工具清单不会刷新）。
-6. 验证：在新会话里对 Agent 说“列出你可用的工具”，能看到 `prepare_listing_update`、`apply_ads_campaign_budget` 等 `prepare_*` / `apply_*` 工具，即挂载成功。
+如果需要兼容旧的每店一个固定 MCP，可以不加 `--combined`：
 
-### 方式 B：node + 脚本完整路径（方式 A 都不行时）
+```powershell
+amz-cli config mcp --portable --accounts shop-a,shop-b --output "$env:USERPROFILE\amz-cli-mcp-separate.json"
+```
 
-先在那台机器的 PowerShell 里生成一段填好真实路径的 JSON，复制后按方式 A 第 1 步导入：
+4. 同事打开 Cherry Studio → 设置 → **MCP 服务器** → **从 JSON 导入**，选择管理员发来的同一个文件，不需要在同事电脑重新生成。
+5. 导入后会得到一个 `Amazon Safe Writes - 多店铺` 服务。所有写工具都有必填 `account`，只允许选择生成配置时列出的店铺；路由器内部仍为每个店铺使用独立的固定账号子进程，不会在同一进程里临时改环境变量。
+6. 打开 Agent 编辑页 → 工具 / MCP，勾选这个多店铺服务并保存，然后**新开一个会话**。
+7. 在新会话里让 Agent 列出工具，确认 `prepare_*` / `apply_*` 的参数包含必填 `account` 及正确的店铺选项。写操作审批卡中的 `account`、站点或业务参数不对时必须拒绝。
+
+生成的 JSON 不含 Amazon 凭证；导入完成并确认可用后可以删除该临时文件。
+
+### 方式 B：本机绝对路径（便携方式无法从 PATH 找到命令时）
+
+先在那台机器的 PowerShell 里生成一段填好真实路径的 JSON。下面示例将 `shop-a`、`shop-b` 合并到一个路由 MCP：
 
 ```powershell
 $node = (Get-Command node).Source
 $srv = Join-Path (npm root -g) 'amz-cli\dist\mcp-server.js'
 Test-Path $srv   # 必须为 True；False 说明这台机器还没 npm install -g amz-cli
-@{ mcpServers = @{ 'Amazon Safe Writes' = @{ command = $node; args = @($srv); env = @{ AMZ_MCP_ALLOW_WRITES = 'true'; AMZ_MCP_ALLOWED_WRITES = 'listing.update,ads.campaign-create,ads.campaign-state,ads.campaign-budget,ads.keyword-bid,ads.negative-keyword,ads.keyword-campaign-launch' } } } } | ConvertTo-Json -Depth 5
+@{ mcpServers = @{ 'Amazon Safe Writes - 多店铺' = @{ command = $node; args = @($srv, '--accounts', 'shop-a,shop-b'); env = @{ AMZ_MCP_ALLOW_WRITES = 'true'; AMZ_MCP_ALLOWED_WRITES = 'listing.update,ads.campaign-create,ads.campaign-extend,ads.campaign-state,ads.campaign-budget,ads.keyword-bid,ads.negative-keyword,ads.keyword-campaign-launch' } } } } | ConvertTo-Json -Depth 5
 ```
 
 若你的 Cherry 版本没有 JSON 导入入口，就手动新增一个 `stdio` 服务，逐项填：
 
 ```text
-名称: Amazon Safe Writes
+名称: Amazon Safe Writes - 多店铺
 类型: stdio
 命令: 上面 $node 输出的完整路径
-参数: 上面 $srv 输出的完整路径
+参数: 上面 $srv 输出的完整路径, --accounts, shop-a,shop-b
 环境变量:
   AMZ_MCP_ALLOW_WRITES=true
-  AMZ_MCP_ALLOWED_WRITES=listing.update,ads.campaign-create,ads.campaign-state,ads.campaign-budget,ads.keyword-bid,ads.negative-keyword,ads.keyword-campaign-launch
+  AMZ_MCP_ALLOWED_WRITES=listing.update,ads.campaign-create,ads.campaign-extend,ads.campaign-state,ads.campaign-budget,ads.keyword-bid,ads.negative-keyword,ads.keyword-campaign-launch
 ```
 
 无论方式 A 还是 B，最后都要回到 Agent 里勾选该 MCP、新开会话，并按上面第 6 步验证。
@@ -255,9 +254,9 @@ Test-Path $srv   # 必须为 True；False 说明这台机器还没 npm install -
 - **显式设置为空**（`AMZ_MCP_ALLOWED_WRITES=` 留空）：拒绝全部正式写入，包括旧默认操作。想吊销所有写权限时用这个。
 - **设置了列表**：只开放列表内的操作；旧默认操作如仍需要必须显式列入。
 
-注意：`prepare_*` 不受写开关和白名单限制（预览本来就是希望 Agent 自动完成的部分），但它会使用配置的凭证发起真实 Amazon API 调用——包括只读查询和 Listing 的 `VALIDATION_PREVIEW` PATCH（官方保证不落库、不产生变更）。`prepare_*` 的返回里有 `applyAllowed` 字段，预告当前环境是否会放行对应的 `apply_*`；为 `false` 时令牌无法兑现，不要发起审批。
+注意：`prepare_*` 不受写开关和白名单限制（预览本来就是希望 Agent 自动完成的部分），但它会使用配置的凭证发起真实 Amazon API 调用——包括只读查询和 Listing 的 `VALIDATION_PREVIEW` PATCH（官方保证不落库、不产生变更）。Listing 写入前可先调用只读 `inspect_listing_schema` 按业务名称搜索真实属性；`prepare_listing_update` 还会强制重新查询卖家专属 Schema，属性不存在或不可编辑时不生成令牌。`prepare_*` 的返回里有 `applyAllowed` 字段，预告当前环境是否会放行对应的 `apply_*`；为 `false` 时令牌无法兑现，不要发起审批。
 
-MCP 默认也会回退读取 `%USERPROFILE%\.amz-cli\.env`。只有明确希望它读取某个项目目录的 `.env` 时，才额外设置：
+MCP 先读取 `%USERPROFILE%\.amz-cli\.env` 的共享配置；合并服务按每次工具参数中的 `account` 把调用交给对应的固定账号子进程，该子进程再加载 `%USERPROFILE%\.amz-cli\accounts\<account>.env` 并隔离店铺 Token。只有明确希望它读取某个项目目录的 `.env` 时，才额外设置：
 
 ```text
 AMZ_CLI_PROJECT_DIR=C:\你的\项目目录
@@ -273,7 +272,7 @@ AMZ_CLI_PROJECT_DIR=C:\你的\项目目录
 
 MCP 工具采用成对设计：
 
-- `prepare_listing_update` / `apply_listing_update`
+- `inspect_listing_schema`（只读）/ `prepare_listing_update` / `apply_listing_update`
 - `prepare_feed_submit` / `apply_feed_submit`
 - `prepare_ads_campaign_create` / `apply_ads_campaign_create`
 - `prepare_ads_campaign_state` / `apply_ads_campaign_state`
@@ -302,7 +301,8 @@ MCP 工具采用成对设计：
 ### 挂载排查
 
 - **新会话里看不到 `prepare_*` / `apply_*` 工具**：多半是加了 MCP 但没在 Agent 里勾选，或勾了没新开会话。回到 Agent 编辑页确认已勾选 `Amazon Safe Writes`，保存后重开会话。
-- **Cherry 里这个 MCP 一直是红/连接失败**：命令或路径不对。方式 A 换 `npx.cmd`；方式 B 先 `Test-Path $srv` 确认脚本存在，为 False 说明这台机器还没 `npm install -g amz-cli`，先装包。
+- **Cherry 里这个 MCP 一直是红/连接失败**：重新运行 `amz-cli config mcp ...` 生成当前安装对应的新 JSON；方式 B 则先用 `Test-Path $srv` 确认脚本存在，为 False 说明这台机器还没正确安装 amz-cli。
+- **工具能用但审批卡里的店铺不对**：拒绝审批，并在对话中明确正确店铺后重新 prepare。合并 MCP 只接受配置允许列表里的 `account`，而且旧店铺的预览令牌不能跨店复用；若正确账号仍不可选，让管理员重新生成并导入 MCP 配置。
 - **工具能出现，但 `prepare_*` 一调就报凭证类错误**：这台机器缺 `.env`。MCP 默认读 `%USERPROFILE%\.amz-cli\.env`（同事机通常是 Broker 模式那份），按第三章配好凭证再试。
 - **`prepare_*` 返回 `applyAllowed: false`**：当前环境没放行对应的正式写入（写开关关闭或不在白名单），令牌无法兑现，别发起审批。核对该 MCP 的 `AMZ_MCP_ALLOW_WRITES` 和 `AMZ_MCP_ALLOWED_WRITES`。
 

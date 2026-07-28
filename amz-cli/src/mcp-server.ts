@@ -12,14 +12,16 @@ import {
   verifyAndConsumePreviewToken,
 } from './internal/confirmation/preview-token.js';
 import { runtimeConfirmationSnapshot } from './internal/confirmation/runtime-snapshot.js';
-import { wrapInternal } from './internal/errs/errors.js';
+import { AmzError, wrapInternal } from './internal/errs/errors.js';
 import {
   executeKeywordCampaignPlan,
   keywordCampaignPlanHash,
   keywordCampaignPlanSchema,
   keywordCampaignPreview,
+  preflightKeywordCampaignProducts,
   type KeywordCampaignPlan,
 } from './shortcuts/ads/keyword-campaign-launch.js';
+import { buildToolContext } from './tools/context.js';
 import type { ToolClientFactories } from './tools/context.js';
 import {
   assertMcpWriteAllowed,
@@ -29,6 +31,8 @@ import {
   previewTokenSchema,
 } from './mcp/common.js';
 import { registerOperationalWriteTools } from './mcp/write-tools.js';
+import { MultiAccountMcpRouter, createStdioAccountConnector } from './mcp/account-router.js';
+import { parseMcpAccounts } from './setup/mcp-config.js';
 
 const MCP_OPERATION = 'mcp launch_keyword_campaign';
 const KEYWORD_CAMPAIGN_PERMISSION = 'ads.keyword-campaign-launch';
@@ -39,8 +43,8 @@ function tokenFlags(plan: KeywordCampaignPlan): Record<string, unknown> {
   return { planHash: keywordCampaignPlanHash(plan) };
 }
 
-function tokenSnapshot(plan: KeywordCampaignPlan): Record<string, unknown> {
-  return { runtime: runtimeConfirmationSnapshot(), planHash: keywordCampaignPlanHash(plan) };
+function tokenSnapshot(plan: KeywordCampaignPlan, account: string): Record<string, unknown> {
+  return { account, runtime: runtimeConfirmationSnapshot(), planHash: keywordCampaignPlanHash(plan) };
 }
 
 export interface AmazonMcpClientFactories extends ToolClientFactories {
@@ -49,39 +53,48 @@ export interface AmazonMcpClientFactories extends ToolClientFactories {
 }
 
 /** 可注入客户端，供无网络单元测试验证 MCP 数据流。 */
-export function createAmazonMcpServer(factories: AmazonMcpClientFactories = {}): McpServer {
+export function createAmazonMcpServer(
+  factories: AmazonMcpClientFactories = {},
+  account: string = 'default',
+): McpServer {
   const server = new McpServer(
-    { name: 'amz-cli-safe-writes', version: '0.2.5' },
+    { name: `amz-cli-safe-writes-${account}`, version: '0.2.6' },
     {
       instructions:
-        '所有 prepare_* 工具只预览；apply_* 和 launch_keyword_campaign 会正式写入 Amazon。' +
+        `当前 MCP 服务固定绑定店铺:${account}。所有 prepare_* 工具只预览；` +
+        'apply_* 和 launch_keyword_campaign 会正式写入 Amazon。' +
         '客户端必须对每一次正式写工具调用向真人请求批准，不得自动批准或使用 bypassPermissions。',
     },
   );
 
-  registerOperationalWriteTools(server, factories);
+  registerOperationalWriteTools(server, factories, account);
 
   server.registerTool(
     'prepare_keyword_campaign',
     {
-      title: '预览完整关键词广告',
+      title: `【${account}】预览完整关键词广告`,
       description:
-        '只做本地参数校验和预览，不调用 Amazon 写接口。返回绑定完整方案和运行环境、15 分钟有效的一次性 previewToken。',
+        `固定店铺:${account}。products[].sku 必填；只有 ASIN 时必须先用 listing mine 批量解析。` +
+        '预览会用只读 Listings API 核实全部 SKU 属于当前店铺和站点，不调用 Amazon 写接口。' +
+        '返回绑定完整方案和运行环境、15 分钟有效的一次性 previewToken。',
       inputSchema: { plan: keywordCampaignPlanSchema },
       annotations: {
         readOnlyHint: true,
         destructiveHint: false,
         idempotentHint: true,
-        openWorldHint: false,
+        openWorldHint: true,
       },
     },
     async ({ plan }) => {
       try {
-        const issued = issuePreviewToken(MCP_OPERATION, tokenFlags(plan), Date.now(), tokenSnapshot(plan));
+        const preflight = await preflightKeywordCampaignProducts(buildToolContext({}, factories).client, plan);
+        const issued = issuePreviewToken(MCP_OPERATION, tokenFlags(plan), Date.now(), tokenSnapshot(plan, account));
         // 与 write-tools 的 prepare_* 一致:预览永远可做,但预告 launch 会不会被放行
         const permission = mcpApplyPermission(KEYWORD_CAMPAIGN_PERMISSION);
         return mcpResult({
+          account,
           ...keywordCampaignPreview(plan),
+          productPreflight: preflight,
           previewToken: issued.token,
           previewExpiresAt: issued.expiresAt,
           applyAllowed: permission.allowed,
@@ -100,9 +113,11 @@ export function createAmazonMcpServer(factories: AmazonMcpClientFactories = {}):
   server.registerTool(
     'launch_keyword_campaign',
     {
-      title: '创建并启动完整关键词广告',
+      title: `【${account}】创建并启动完整关键词广告`,
       description:
-        '高风险写操作：消费 prepare 返回的一次性令牌，在 Amazon 创建 Campaign、广告组、商品广告和关键词；' +
+        `固定店铺:${account}。高风险写操作：消费 prepare 返回的一次性令牌，` +
+        'products[].sku 必须已经解析并通过店铺/站点校验；正式写入前会再次只读核实，失败时不会创建 Campaign。' +
+        '在 Amazon 创建 Campaign、广告组、商品广告和关键词；' +
         '全部回查成功后才按方案启用。客户端必须在每次调用前展示方案并向真人请求批准。',
       inputSchema: { plan: keywordCampaignPlanSchema, previewToken: previewTokenSchema },
       annotations: {
@@ -115,13 +130,15 @@ export function createAmazonMcpServer(factories: AmazonMcpClientFactories = {}):
     async ({ plan, previewToken }) => {
       try {
         assertMcpWriteAllowed(KEYWORD_CAMPAIGN_PERMISSION);
+        // 在消费一次性令牌和创建任何 Ads 对象之前复核，失败时允许修正后重新预览。
+        await preflightKeywordCampaignProducts(buildToolContext({}, factories).client, plan);
         // Cherry 已批准本次破坏性工具调用后，才会进入 handler。令牌在首次正式执行前原子消费。
         verifyAndConsumePreviewToken(
           MCP_OPERATION,
           tokenFlags(plan),
           previewToken,
           Date.now(),
-          tokenSnapshot(plan),
+          tokenSnapshot(plan, account),
         );
         const launched = await executeKeywordCampaignPlan(
           factories.adsClient ? factories.adsClient() : new AdsClient(),
@@ -130,7 +147,7 @@ export function createAmazonMcpServer(factories: AmazonMcpClientFactories = {}):
           process.stderr.write(`${message}\n`);
           },
         );
-        return mcpResult(launched);
+        return mcpResult({ account, ...launched });
       } catch (error) {
         return mcpErrorResult(error);
       }
@@ -141,16 +158,73 @@ export function createAmazonMcpServer(factories: AmazonMcpClientFactories = {}):
 }
 
 /** 向后兼容现有测试和调用方；新代码可使用 createAmazonMcpServer 注入两类客户端。 */
-export function createAmazonAdsMcpServer(clientFactory: AdsClientFactory = () => new AdsClient()): McpServer {
-  return createAmazonMcpServer({ adsClient: clientFactory });
+export function createAmazonAdsMcpServer(
+  clientFactory: AdsClientFactory = () => new AdsClient(),
+  account: string = 'default',
+): McpServer {
+  return createAmazonMcpServer({ adsClient: clientFactory }, account);
+}
+
+/** 从 argv 提取多店铺 MCP 的 --accounts，并在连接 Cherry 前移除。 */
+export function extractAccountsArg(argv: string[]): string[] | undefined {
+  const direct = argv.indexOf('--accounts');
+  if (direct >= 0) {
+    const value = argv[direct + 1];
+    if (!value || value.startsWith('-')) throw accountsMissingValue();
+    argv.splice(direct, 2);
+    const accounts = parseMcpAccounts(value);
+    if (accounts.length === 0) throw accountsMissingValue();
+    return accounts;
+  }
+  const prefixed = argv.findIndex((value) => value.startsWith('--accounts='));
+  if (prefixed >= 0) {
+    const value = argv[prefixed]!.slice('--accounts='.length);
+    if (!value) throw accountsMissingValue();
+    argv.splice(prefixed, 1);
+    const accounts = parseMcpAccounts(value);
+    if (accounts.length === 0) throw accountsMissingValue();
+    return accounts;
+  }
+  return undefined;
+}
+
+function accountsMissingValue(): AmzError {
+  return new AmzError({
+    type: 'invalid_param',
+    subtype: 'mcp_accounts_missing_value',
+    param: '--accounts',
+    hintAgent: 'fix_param',
+    hintHuman: '--accounts 后需要店铺代号列表，例如 --accounts shop-a,shop-b。',
+    message: '--accounts requires a comma-separated account list',
+  });
 }
 
 async function main(): Promise<void> {
   const projectDir = process.env['AMZ_CLI_PROJECT_DIR']?.trim();
   loadDotEnvIfPresent(process.env, projectDir || process.cwd());
   const account = extractAccountArg(process.argv);
-  if (account) loadAccount(account);
-  const server = createAmazonMcpServer();
+  const accounts = extractAccountsArg(process.argv);
+  if (account && accounts) {
+    throw new AmzError({
+      type: 'invalid_param',
+      subtype: 'mcp_account_mode_conflict',
+      param: '--account/--accounts',
+      hintAgent: 'fix_param',
+      hintHuman: '--account（固定单店）和 --accounts（多店路由）不能同时使用。',
+      message: '--account and --accounts are mutually exclusive',
+    });
+  }
+
+  let server: McpServer | MultiAccountMcpRouter;
+  if (accounts) {
+    const serverPath = resolve(process.argv[1]!);
+    server = new MultiAccountMcpRouter(accounts, {
+      connector: createStdioAccountConnector({ serverPath }),
+    });
+  } else {
+    if (account) loadAccount(account);
+    server = createAmazonMcpServer({}, account ?? 'default');
+  }
   await server.connect(new StdioServerTransport());
 }
 

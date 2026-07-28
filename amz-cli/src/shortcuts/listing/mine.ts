@@ -75,6 +75,98 @@ function missingSellerIdError(brokerMode: boolean): AmzError {
   });
 }
 
+export interface ResolvedListingSku {
+  asin: string;
+  sku: string;
+}
+
+/**
+ * Resolve one ASIN to exactly one SKU in the selected store/marketplace.
+ * Write operations use this instead of trusting an AI-generated SKU.
+ */
+export async function resolveUniqueListingSku(
+  flags: Record<string, unknown>,
+  client: SpApiClient,
+  expectedSku?: string,
+): Promise<ResolvedListingSku> {
+  const mkt = resolveMarketplace(flags['marketplace']);
+  const sellerId = await resolveSellerId(flags, mkt.region, client);
+  const asin = (strFlag(flags, 'asin') ?? '').trim().toUpperCase();
+  if (!/^[A-Z0-9]{10}$/.test(asin)) {
+    throw new AmzError({
+      type: 'invalid_param',
+      subtype: 'listing.invalid_asin',
+      param: '--asin',
+      hintAgent: 'fix_param',
+      hintHuman: 'ASIN 必须是 10 位字母或数字。请核对商品详情页 /dp/ 后面的编号。',
+      message: `invalid ASIN: ${JSON.stringify(asin)}`,
+    });
+  }
+
+  const response = (await client.get(
+    `/listings/2021-08-01/items/${encodeURIComponent(sellerId)}`,
+    {
+      marketplaceIds: mkt.id,
+      includedData: 'summaries,issues',
+      identifiers: asin,
+      identifiersType: 'ASIN',
+      pageSize: 20,
+    },
+    mkt.region,
+  )) as { items?: Array<Record<string, unknown>> };
+
+  const matchedSkus = [...new Set((response.items ?? []).flatMap((item) => {
+    const summaries = Array.isArray(item['summaries'])
+      ? item['summaries'] as Array<Record<string, unknown>>
+      : [];
+    const matchesAsin = summaries.some(
+      (summary) => String(summary['asin'] ?? '').trim().toUpperCase() === asin,
+    );
+    const sku = typeof item['sku'] === 'string' ? item['sku'].trim() : '';
+    return matchesAsin && sku ? [sku] : [];
+  }))];
+
+  if (matchedSkus.length === 0) {
+    throw new AmzError({
+      type: 'invalid_param',
+      subtype: 'listing.asin_not_found',
+      param: '--asin',
+      hintAgent: 'report_to_human',
+      hintHuman:
+        `ASIN ${asin} 在当前店铺的 ${mkt.country} 站没有匹配到 SKU。` +
+        '已停止写入；请核对店铺、站点和 ASIN，不能改用猜测的 SKU。',
+      message: `ASIN ${asin} did not match any SKU in marketplace ${mkt.country}`,
+    });
+  }
+  if (expectedSku && !matchedSkus.includes(expectedSku)) {
+    throw new AmzError({
+      type: 'invalid_param',
+      subtype: 'listing.asin_sku_mismatch',
+      param: '--asin/--sku',
+      hintAgent: 'report_to_human',
+      hintHuman:
+        `ASIN ${asin} 在当前店铺的 ${mkt.country} 站匹配到 ${matchedSkus.join('、')}，` +
+        `与用户提供的 SKU ${expectedSku} 不一致。已停止写入；请用户重新确认 ASIN 或 SKU。`,
+      message: `ASIN ${asin} does not match expected SKU ${expectedSku}; matched: ${matchedSkus.join(', ')}`,
+    });
+  }
+  if (expectedSku) return { asin, sku: expectedSku };
+  if (matchedSkus.length > 1) {
+    throw new AmzError({
+      type: 'invalid_param',
+      subtype: 'listing.asin_ambiguous',
+      param: '--asin',
+      hintAgent: 'report_to_human',
+      hintHuman:
+        `ASIN ${asin} 在当前店铺的 ${mkt.country} 站匹配到多个 SKU：${matchedSkus.join('、')}。` +
+        '已停止写入；必须由用户明确选择其中一个 SKU 后重新预览。',
+      message: `ASIN ${asin} matched multiple SKUs: ${matchedSkus.join(', ')}`,
+    });
+  }
+
+  return { asin, sku: matchedSkus[0]! };
+}
+
 const SELLER_ID_FLAG = {
   name: 'seller-id',
   desc: '卖家编号(本地模式可省略并读 SELLER_ID;Broker 模式仅用于与服务端返回值核对,不能兜底)',
@@ -184,12 +276,38 @@ export const listingMine: ToolDefinition = {
     };
 
     const items = resp.items ?? [];
+    const requestedAsins = asins?.split(',').map((asin) => asin.trim().toUpperCase()).filter(Boolean);
+    const asinSkuMatches = requestedAsins?.map((asin) => {
+      const matched = items.filter((item) => {
+        const summaries = Array.isArray(item['summaries'])
+          ? (item['summaries'] as Array<Record<string, unknown>>)
+          : [];
+        return summaries.some((summary) => String(summary['asin'] ?? '').toUpperCase() === asin);
+      });
+      const matchedSkus = matched
+        .map((item) => item['sku'])
+        .filter((sku): sku is string => typeof sku === 'string' && sku.length > 0);
+      return {
+        asin,
+        skus: matchedSkus,
+        status: matchedSkus.length === 1 ? 'UNIQUE' : matchedSkus.length === 0 ? 'NOT_FOUND' : 'AMBIGUOUS',
+      };
+    });
     return {
       marketplace: mkt.country,
       numberOfResults: resp.numberOfResults ?? 0,
       items,
       // 按 ASIN 查时,直接把命中的本店铺 SKU 提出来,方便"ASIN→我的 SKU"确认
       ...(asins ? { matchedSkus: items.map((it) => it['sku']).filter(Boolean) } : {}),
+      ...(asinSkuMatches
+        ? {
+            asinSkuMatches,
+            unmatchedAsins: asinSkuMatches.filter((match) => match.status === 'NOT_FOUND').map((match) => match.asin),
+            ambiguousAsins: asinSkuMatches
+              .filter((match) => match.status === 'AMBIGUOUS')
+              .map((match) => ({ asin: match.asin, skus: match.skus })),
+          }
+        : {}),
       ...(resp.pagination?.nextToken ? { nextToken: resp.pagination.nextToken } : {}),
     };
   },

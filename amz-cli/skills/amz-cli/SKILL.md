@@ -25,10 +25,20 @@ description: 使用 amz-cli 安全查询和运营 Amazon 卖家店铺。适用�
 | 批量库存或 Listing 修改 | `feed submit` |
 | 广告账户、活动、关键词、报表 | `ads profiles/campaigns/keywords/report-run` |
 | 用已经选好的关键词建立完整 SP 广告 | `ads keyword-campaign-launch`（JSON 方案；先 dry-run） |
+| 向已有 SP 广告活动/广告组追加商品或正向关键词 | `ads campaign-extend`（JSON 方案；先 dry-run） |
 
 ## 意图判定与追问
 
 先利用当前对话已经出现的店铺、站点、ASIN/SKU、时间范围和业务目标，不要重复询问。意图及必要参数明确时，直接运行最小、最快的只读命令；不要为了确认而确认。
+
+### 多店铺选择
+
+- 用户或管理员给出的店铺代号对应全局 `--account <名称>`，例如 `amz-cli --account shop-a sales stats ...`。命令位置前后均可，但每次调用只能选择一个店铺。
+- 当前请求或本轮连续对话中已经由用户明确店铺时，只读查询直接复用该店铺，不要重复追问；查询结果仍要明确报告店铺和站点。
+- 用户没有明确店铺、同时提到多个店铺但目标不清，或中途说“换一家”却未给名称时，必须先让用户选择。绝不能把主 `.env` 当成默认店铺，也不能根据 ASIN/SKU、站点、品牌或历史习惯猜店铺。
+- 多店铺 MCP 的每个 `prepare_*` / `apply_*`（以及 `prepare_keyword_campaign` / `launch_keyword_campaign`）都有必填 `account`。使用当前对话已明确的店铺填写；没有明确店铺时先追问，不能调用工具试错。旧的固定店铺 MCP 仍只能用于其标题所示店铺。
+- 写操作不额外单独追问一次已经明确的店铺，而是把店铺、站点、对象和改动内容一起放进预览与 Cherry 审批卡供用户核对。`prepare` 与 `apply` 必须使用同一个 `account`；不得拿 A 店铺的预览令牌去调用 B 店铺。
+- 报给用户的查询结果和写操作预览都要明确说出店铺代号与站点，不能只说“当前店铺”。
 
 只有不同理解会明显改变查询对象、范围、等待时间、输出形态或产生费用时，先用运营能理解的话追问，再调用 CLI：
 
@@ -75,7 +85,7 @@ Broker 模式下，`listing mine/sku/schema/update` 的 Seller ID 必须来自 B
 - **有 → 必须走「A. MCP 通道」**。这是运营在 Cherry 审批卡里批准写操作的设计初衷；此时**不要**退回 CLI `--dry-run`，也不要让用户去 PowerShell 跑 `--confirm`。
 - **没有 → 才走「B. CLI 通道」**。
 
-无论哪条通道，预览（prepare 或 dry-run）前都要先确认会改变业务含义的目标和参数（店铺/站点、商品、预算、竞价、匹配方式、期望状态）；不确定就追问，不能替用户拍板。
+无论哪条通道，预览（prepare 或 dry-run）前都要确保会改变业务含义的目标和参数已经由用户明确（店铺/站点、商品、预算、竞价、匹配方式、期望状态）；缺少或有歧义就追问，不能替用户拍板。店铺已经在当前连续对话中明确时不单独重复确认，而是在写入预览和审批卡中与其他参数一起核对。
 
 **每次写操作在用户批准前，必须把"将写入什么"逐项列清，用中文摆给用户看，不能只说"改好了/即将修改"这类含糊话：**
 
@@ -86,16 +96,19 @@ Broker 模式下，`listing mine/sku/schema/update` 的 Seller ID 必须来自 B
 
 列清后再让用户在审批卡（MCP 通道）或终端（CLI 通道）确认；用户核对无误才执行。预览返回里有 issues/警告的，一并原文转达，不要略过。
 
-**用户只给了 ASIN、但写操作需要 SKU 时（Listing 修改、建广告等），先解析再写，不要让写命令自己猜：**
+**用户只给了 ASIN、但写操作需要 SKU 时，必须先得到本店真实 SKU，绝不猜测：**
 
-1. 先用只读命令解析该 ASIN 对应本店铺的 SKU：`listing mine --marketplace <站点> --asin <ASIN>`（返回里的 `matchedSkus` 就是命中的 SKU）。
+1. 先用只读命令解析该 ASIN 对应本店铺的 SKU：`listing mine --marketplace <站点> --asin <ASIN>`。多个 ASIN 必须合并成一次批量查询，例如 `--asin "ASIN1,ASIN2,ASIN3"`（最多 20 个），不要逐个调用浪费时间。优先读取 `asinSkuMatches` 的逐个映射；`matchedSkus` 仅用于兼容旧输出。
 2. 按结果分三种处理：
    - **正好 1 个 SKU**：明确告诉用户「ASIN X 对应你店铺的 SKU Y，本次将对 Y 操作」，然后用这个明确的 SKU 进入预览。
    - **多个 SKU**：**必须列出来让用户选**哪个，绝不自行挑一个写入。
    - **0 个**：说明这个 ASIN 不在该站点的本店铺商品里，请用户确认站点是否正确或直接给 SKU；不要继续。
 3. 站点要对齐：ASIN→SKU 的查询站点必须和后续写操作的站点一致（北美/欧洲凭证隔离，德国站要 `--marketplace DE`）。
-
-绝不把"从 ASIN 推断 SKU"塞进写操作内部自动完成——写操作只接受明确的 SKU，且这个 SKU 必须在预览/审批卡里被用户看到。
+4. Listing 修改的 `prepare_listing_update` / `listing update` 可以直接接收 `asin`，程序会按当前店铺和站点查询 SKU：
+   - 唯一匹配才进入预览，并在预览/审批卡显示最终 SKU。
+   - 匹配多个时列出 SKU 并询问用户；用户选择后把 `asin` 与所选 `sku` 一起重新预览，程序会交叉核对。
+   - 查不到或 ASIN/SKU 不一致时，原样转达错误并询问用户核对店铺、站点、ASIN 或 SKU；不得自动改用其他值。
+5. 广告写入仍只接收已核实的 `products[].sku`；多个 ASIN 应先用一次批量 `listing mine --asin ...` 解析，不能把 ASIN 直接传给广告写接口。
 
 **写操作/建广告执行前，先查一次商品 listing 做落地确认（既拿到 SKU，也确认商品真在自己店铺里）：**
 
@@ -105,13 +118,21 @@ Broker 模式下，`listing mine/sku/schema/update` 的 Seller ID 必须来自 B
 
 **加否定关键词（negative-keyword）前，先确认广告组身份，别只对着裸 ID 下手：** 该操作按 `campaignId` + `adGroupId` 定位，预览默认只显示这两串数字。执行前先用 `ads keywords --profile-id <ID> --campaign-id <活动ID>` 列出该活动的关键词与广告组，确认 `adGroupId` 对应的是哪个广告组，并在报给用户时带上**活动/广告组的人话名称**（不是只有数字），避免把否定词下到错误的广告组。
 
+**向已有广告活动追加商品/正向关键词时，不得重建活动：**
+
+1. 用户只给 ASIN 时，先用一次批量 `listing mine --asin "ASIN1,ASIN2,..."` 解析并确认每个本店 SKU；Listing 修改也继续只使用这个已确认的 SKU，不把 ASIN 当 SKU。
+2. 只读查询并确认目标 `campaignId`、`adGroupId`、活动/广告组名称、当前状态和归属关系。添加正向关键词时，目标活动必须是手动投放。
+3. 使用 MCP `prepare_ads_campaign_extend`（无 MCP 时使用 `ads campaign-extend --plan <文件> --dry-run`），预览必须分别列出“已经存在”和“将新增”的 SKU/关键词，并明确不会修改预算、活动状态、广告组状态或已有竞价。
+4. 目标活动已经启用时，提醒新增商品和关键词成功后可能立即参与投放并产生花费，再让用户审批 `apply_ads_campaign_extend`。
+5. 部分成功、超时或回读不一致时，不得复用旧预览或重放整批内容；重新 prepare，系统会按远端现状只列出仍缺少的项目。
+
 **A. MCP 通道（工具清单里有 `prepare_*` 时——优先）**
 
-1. 调对应的 `prepare_*` 工具（不是 `--dry-run` 命令），读回预览：当前值 → 改动、issues、`previewToken`、`applyAllowed`。
+1. 调对应的 `prepare_*` 工具（不是 `--dry-run` 命令）；多店铺 MCP 必须同时传入当前对话已明确的 `account`。读回预览：店铺/站点、当前值 → 改动、issues、`previewToken`、`applyAllowed`。
 2. 把改动、人类可读风险和预览摘要报给用户，说明这是预览、尚未写入。
 3. `applyAllowed` 为 `false` 时，说明当前环境未放行该正式写入，令牌无法兑现，**不要**发起审批，把原因告诉用户。
-4. 用户认可后调用对应的 `apply_*`（完整关键词广告用 `launch_keyword_campaign`）。真正的人工把关是 **Cherry 弹出的工具审批卡**：由用户在卡上核对参数并批准。不得自动批准，不得使用 `bypassPermissions`，聊天里的“确定/Y”不能替代审批卡。
-5. 业务参数、文件、账户、区域或预览依据的远端状态变化后，必须重新 `prepare_*`。
+4. 用户认可后调用对应的 `apply_*`（完整关键词广告用 `launch_keyword_campaign`），并传入与 prepare 完全相同的 `account`。真正的人工把关是 **Cherry 弹出的工具审批卡**：由用户同时核对店铺、站点和业务参数后批准。不得自动批准，不得使用 `bypassPermissions`，聊天里的“确定/Y”不能替代审批卡。
+5. 业务参数、文件、账户、区域或预览依据的远端状态变化后，必须重新 `prepare_*`；跨店铺复用令牌属于错误，不能重试 apply。
 
 **B. CLI 通道（工具清单里没有上述 MCP 工具时）**
 
@@ -120,11 +141,12 @@ Broker 模式下，`listing mine/sku/schema/update` 的 Seller ID 必须来自 B
 3. 给出业务参数完全相同的最终命令：`--confirm --preview-token <token>`。
 4. 要求用户本人在交互式 PowerShell 终端运行；CLI 会再次要求 `y` 或不可撤销 Feed 的随机确认码。
 
-**广告创建一律分两个阶段，绝不在创建那一步就开启投放（开启=开始花钱）：**
+**完整广告默认一次审批后创建并投放：**
 
 `ads campaign-create` 只创建 Campaign 外壳；用户说“用这些关键词建广告”时用 `ads keyword-campaign-launch`（MCP 通道对应 `prepare_keyword_campaign` → `launch_keyword_campaign`）。
 
-**第一阶段——创建为暂停：**
+用户说“把这些 SKU/关键词加入已有活动”时，使用 `ads campaign-extend`（MCP 对应 `prepare_ads_campaign_extend` → `apply_ads_campaign_extend`），不能改用 `keyword-campaign-launch` 创建新活动，也不能因旧 `launchId` 冲突而换一个 `launchId` 重建。
+
 1. 先确认 profile/区域、商品、日预算、日期、广告组默认竞价、每个关键词的匹配方式与竞价。缺信息时**用一张清单带用户补齐**，别一个个逼问，例如：
 
    > 建这套广告我需要这几样，你发我就行（不用管格式）：
@@ -134,18 +156,15 @@ Broker 模式下，`listing mine/sku/schema/update` 的 Seller ID 必须来自 B
    > 4. 广告放哪个**站点**（美国 / 德国…）
    > （开始日期、广告组默认竞价我可以给你建议默认值）
 
-   - **一个活动支持多个商品**：用户给多个 ASIN/SKU（如同一商品的几个变体）时，全部放进方案的 `products` 数组（1–20 个，每个仍是 asin/sku 二选一），不要说"只支持一个"，也不要替用户拆成多个活动；用户明确要分开投放时才拆。
+   - **一个活动支持多个商品**：用户给多个 ASIN/SKU（如同一商品的几个变体）时，先把所有 ASIN 一次批量解析为本店 SKU，再全部放进方案的 `products` 数组（1–20 个）。`products[].sku` 必填；`asin` 只能作为预览核对字段，不能代替 SKU，也不会发送给广告写接口。不要说"只支持一个"，也不要替用户拆成多个活动；用户明确要分开投放时才拆。
    - 把多个 ASIN 转成 `products` 数组是你的工作，不要求用户提供 JSON 或数组。
-   - 只给 ASIN 时按上面的 ASIN→SKU 规则先解析确认商品在店铺里。
+   - 只给 ASIN 时按上面的 ASIN→SKU 规则先批量解析并确认商品在店铺里。没有唯一 SKU 映射时必须停止，不能调用 `prepare_keyword_campaign` 试错。
    - 同时告知：同一广告组内的所有商品**共享同一套关键词和竞价**；预览时把每个商品逐个列出让用户核对。
-2. 方案里 `enableAfterCreate` 一律设为 `false`（`campaign-create` 用 `state=PAUSED`）——**不要一步创建成启用**。
-3. 走完整逐项预览 + 审批卡批准后创建。创建成功后是【暂停】状态，不产生任何花费。
-
-**第二阶段——列清、说明、再问是否开启：**
-4. 创建成功后，把已创建的内容**完整再列一遍**：广告活动名称与日预算、广告组、投放的商品（ASIN/SKU）、以及每个关键词及其匹配方式与竞价。
-5. **逐条说明作用**，并明确告知“开启后广告立即开始投放并产生花费”。
-6. **主动询问用户：是否要开启（可以全部开启，也可以选择部分/暂不开启）。** 不要替用户决定，也不要默认帮他开。
-7. 用户明确要开启后，把“开启”作为**独立的第二次写操作**执行：对创建返回的 campaignId 走 `ads campaign-state --state ENABLED`（MCP 通道用 `prepare_ads_campaign_state` → `apply_ads_campaign_state`），同样要逐项预览 + 审批卡批准。
+2. 用户说“新建/创建广告”“开始投放”等正常创建意图时，方案明确设置 `enableAfterCreate=true`。这表示同一次预览和审批覆盖“创建完整广告并在校验成功后启用”，不再拆成第二次启用审批。
+3. 只有用户明确说“保持暂停”“暂不投放”“先建好不要开启”时，才设置 `enableAfterCreate=false`。不要在用户已经表达正常创建意图时重复追问是否启用。
+4. 预览必须逐项展示广告活动名称、日预算、广告组、全部商品（ASIN→SKU）、每个关键词、匹配方式、竞价，以及最终状态“ENABLED，创建完成后立即开始投放并产生花费”。运营在同一张审批卡中核对并批准。
+5. 底层仍固定先创建 PAUSED Campaign，只有广告组、全部商品广告、全部关键词创建成功且逐项回读一致后才自动启用。任何部分失败、校验失败或结果不明确都保持暂停，不得报告已经投放。
+6. 如果用户明确选择暂停创建，后续又要求开启，才将开启作为独立写操作：对返回的 campaignId 使用 `ads campaign-state --state ENABLED`（MCP 用 `prepare_ads_campaign_state` → `apply_ads_campaign_state`）。
 
 MCP 正式写工具还受管理员配置的 `AMZ_MCP_ALLOWED_WRITES` 白名单限制；被拒绝时报告给管理员，不得自行扩大权限。
 
@@ -163,17 +182,20 @@ MCP 正式写工具还受管理员配置的 `AMZ_MCP_ALLOWED_WRITES` 白名单�
 ## 改 Listing 字段的固定流程（标题/五点/亮点/图片等）
 
 1. `listing sku --include productTypes` 查该 SKU 的产品类型。
-2. `listing schema --product-type <类型>` 查字段确切名字；`--attribute <字段>` 看结构、字数限制、条数限制。**不要凭记忆或其他产品类型的经验拼 patch**——每个产品类型的 schema 不同。
+2. 先查当前店铺、站点和商品类型的卖家专属 Schema：
+   - **MCP 通道**：优先调用只读 `inspect_listing_schema`。用户说的是“Item Highlights/商品亮点”等业务名称时先传 `query` 搜索显示名称和说明；只有唯一匹配后，再用 `attribute` 读取真实属性的完整定义。
+   - **CLI 通道**：`listing schema --product-type <类型> --grep <业务名称>` 搜索，再用 `--attribute <真实属性名>` 看结构、字数限制和条数限制。
+   **不要凭记忆或其他产品类型的经验拼 patch**。查不到或匹配多个时，列出证据并询问用户；不得换几个猜测字段名反复调用预览。
 3. 照 schema 拼 patch JSON 写入临时文件，用 `--patches @文件路径` 传入。若预览报 8560，不要自动添加字段：先读本次 issues，并确认当前 schema 是否包含 `merchant_suggested_asin`、ASIN 是否已核对；只有两者都满足时才按 schema 结构补充并重新预览。
 4. 预览（按上面「写操作」的通道判断二选一）：
-   - **MCP 通道**：调 `prepare_listing_update`（内部即走官方 `VALIDATION_PREVIEW`），读回 `status`、issues、`previewToken`、`applyAllowed`。
+   - **MCP 通道**：调 `prepare_listing_update`。程序会再次强制获取卖家专属 Schema，核对补丁属性存在且未标记为不可编辑，并把 Schema 版本/校验值绑定进令牌；通过后才走官方 `VALIDATION_PREVIEW`。读回 `schemaValidation`、`status`、issues、`previewToken`、`applyAllowed`。
    - **CLI 通道**：`listing update --dry-run`（同样走 `VALIDATION_PREVIEW`）。
    两者判读一致：`status=VALID` 且没有 ERROR issue 才算预览通过（`ACCEPTED` 是正式提交的状态，不是预览状态）；`INVALID` 时把 issues 原文报给用户。
 5. 执行（与第 4 步同一通道）：
    - **MCP 通道**：报预览摘要，用户认可后调用 `apply_listing_update`，由 Cherry 审批卡人工把关；不要给用户 CLI confirm 命令。
    - **CLI 通道**：把带预览令牌的 confirm 命令交给用户本人在 PowerShell 执行。
 
-商品亮点（Item Highlights）等新字段按市场和产品类型逐步开放，字段名可能因类型而异。Amazon 公告要求标题 ≤75 字符；但某个错误码不能单独证明只是标题长度问题。**只有当前产品类型的 `listing schema` 实际返回的字段才能用**，不要把一个类型的字段名或结构照搬到其他类型。用户给出优化后的文案时，按本流程转换并校验，不要直接替用户执行写入。
+商品亮点（Item Highlights）等新字段按市场和产品类型逐步开放，字段名可能因类型而异。Amazon 公告要求标题 ≤75 字符；但某个错误码不能单独证明只是标题长度问题。**只有当前卖家、站点、产品类型的最新 Schema 实际返回且允许编辑的字段才能用**，不要把一个类型的字段名或结构照搬到其他类型。只有 `inspect_listing_schema`/`listing schema` 没有匹配项，或唯一匹配项明确 `editable=false`，才能向用户说明当前 API Schema 不支持；“尝试了几个字段名都失败”不是证据。
 
 ## 回答方式
 

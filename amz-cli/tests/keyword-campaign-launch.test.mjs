@@ -8,12 +8,14 @@ import {
   executeKeywordCampaignPlan,
   keywordCampaignPreview,
   parseKeywordCampaignPlan,
+  preflightKeywordCampaignProducts,
 } from '../dist/shortcuts/ads/keyword-campaign-launch.js';
 
 const tempDirs = [];
 
 afterEach(() => {
   delete process.env.AMZ_CLI_STATE_DIR;
+  delete process.env.SELLER_ID;
   for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
@@ -23,6 +25,7 @@ function plan(overrides = {}) {
     launchId: 'launch-test-001',
     profileId: '123456789',
     region: 'na',
+    marketplace: 'US',
     campaign: {
       name: 'B0TEST keyword launch',
       dailyBudget: 20,
@@ -30,7 +33,7 @@ function plan(overrides = {}) {
       biddingStrategy: 'LEGACY_FOR_SALES',
     },
     adGroup: { name: 'Core keywords', defaultBid: 0.8 },
-    product: { asin: 'B012345678' },
+    product: { sku: 'SKU-1', asin: 'B012345678' },
     keywords: [
       { text: 'soap bar', matchType: 'EXACT', bid: 0.75 },
       { text: 'natural soap', matchType: 'PHRASE', bid: 0.65 },
@@ -89,7 +92,7 @@ class SuccessfulAdsClient {
     if (method === 'POST' && path === '/sp/productAds/list') {
       const include = opts.body.adIdFilter.include.map(String);
       const known = this.createdAds ?? [
-        { campaignId: '1001', adGroupId: '2001', adId: '3001', asin: 'B012345678', state: 'ENABLED' },
+        { campaignId: '1001', adGroupId: '2001', adId: '3001', sku: 'SKU-1', state: 'ENABLED' },
       ];
       return { productAds: known.filter((ad) => include.includes(String(ad.adId))) };
     }
@@ -252,12 +255,65 @@ test('ambiguous write result blocks automatic resume instead of replaying create
 test('legacy single-product plans still parse into a products array', () => {
   const parsed = parseKeywordCampaignPlan(JSON.stringify(plan()));
   assert.equal(parsed.products.length, 1);
-  assert.equal(parsed.products[0].asin, 'B012345678');
+  assert.equal(parsed.products[0].sku, 'SKU-1');
   assert.equal(parsed.product, undefined);
 });
 
+test('ASIN-only products are rejected before any Ads request can be made', () => {
+  const p = plan({ products: [{ asin: 'B012345678' }] });
+  delete p.product;
+  assert.throws(() => parseKeywordCampaignPlan(JSON.stringify(p)), /sku/i);
+});
+
+test('product preflight verifies all SKUs in one store listing request', async () => {
+  process.env.SELLER_ID = 'SELLER';
+  const calls = [];
+  const client = {
+    async get(path, query, region) {
+      calls.push({ path, query, region });
+      return { items: [{ sku: 'SKU-1' }, { sku: 'SKU-2' }] };
+    },
+  };
+  const p = plan({ products: [{ sku: 'SKU-1' }, { sku: 'SKU-2', asin: 'B012345678' }] });
+  delete p.product;
+  const parsed = parseKeywordCampaignPlan(JSON.stringify(p));
+
+  const result = await preflightKeywordCampaignProducts(client, parsed);
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].query.identifiersType, 'SKU');
+  assert.equal(calls[0].query.identifiers, 'SKU-1,SKU-2');
+  assert.equal(calls[0].query.marketplaceIds, 'ATVPDKIKX0DER');
+  assert.equal(calls[0].region, 'na');
+  assert.deepEqual(result.verifiedProducts, [{ sku: 'SKU-1' }, { sku: 'SKU-2', asin: 'B012345678' }]);
+});
+
+test('product preflight rejects a missing SKU before Ads execution', async () => {
+  process.env.SELLER_ID = 'SELLER';
+  const client = { get: async () => ({ items: [{ sku: 'SKU-1' }] }) };
+  const p = plan({ products: [{ sku: 'SKU-1' }, { sku: 'MISSING-SKU' }] });
+  delete p.product;
+  const parsed = parseKeywordCampaignPlan(JSON.stringify(p));
+
+  await assert.rejects(
+    preflightKeywordCampaignProducts(client, parsed),
+    (error) => error instanceof AmzError && error.subtype === 'ads.keyword_campaign_sku_not_in_store',
+  );
+});
+
+test('product preflight rejects marketplace and Ads region mismatch without a request', async () => {
+  const p = plan({ marketplace: 'FR', region: 'na' });
+  const parsed = parseKeywordCampaignPlan(JSON.stringify(p));
+  let requested = false;
+  await assert.rejects(
+    preflightKeywordCampaignProducts({ get: async () => { requested = true; } }, parsed),
+    /region=na/,
+  );
+  assert.equal(requested, false);
+});
+
 test('duplicate products in a plan are rejected locally', () => {
-  const p = plan({ products: [{ asin: 'B012345678' }, { asin: 'B012345678' }] });
+  const p = plan({ products: [{ sku: 'SKU-1' }, { sku: 'SKU-1', asin: 'B012345678' }] });
   delete p.product;
   assert.throws(() => parseKeywordCampaignPlan(JSON.stringify(p)), /duplicate product/);
 });
@@ -267,10 +323,10 @@ test('multi-product plan creates all product ads in one call and verifies each o
   const client = new SuccessfulAdsClient();
   const p = plan({
     products: [
-      { asin: 'B012345678' },
-      { asin: 'B012345679' },
-      { sku: 'VARIANT-SKU-3' },
-      { asin: 'B012345680' },
+      { sku: 'VARIANT-SKU-1', asin: 'B012345678' },
+      { sku: 'VARIANT-SKU-2', asin: 'B012345679' },
+      { sku: 'VARIANT-SKU-3', asin: 'B012345670' },
+      { sku: 'VARIANT-SKU-4', asin: 'B012345680' },
     ],
   });
   delete p.product;
@@ -284,6 +340,11 @@ test('multi-product plan creates all product ads in one call and verifies each o
   const createCalls = client.calls.filter(({ method, path }) => method === 'POST' && path === '/sp/productAds');
   assert.equal(createCalls.length, 1, 'all product ads must be created in a single array call');
   assert.equal(createCalls[0].opts.body.productAds.length, 4);
+  assert.deepEqual(
+    createCalls[0].opts.body.productAds.map(({ sku }) => sku),
+    ['VARIANT-SKU-1', 'VARIANT-SKU-2', 'VARIANT-SKU-3', 'VARIANT-SKU-4'],
+  );
+  assert.equal(createCalls[0].opts.body.productAds.some((product) => 'asin' in product), false);
   assert.equal(result.productCount, 4);
   assert.equal(Object.keys(result.adIds).length, 4);
   assert.equal(result.state, 'ENABLED');
@@ -291,7 +352,7 @@ test('multi-product plan creates all product ads in one call and verifies each o
 
 test('partial product-ad failure journals progress and resume submits only the missing product', async () => {
   isolatedState();
-  const p = plan({ products: [{ asin: 'B012345678' }, { asin: 'B012345679' }] });
+  const p = plan({ products: [{ sku: 'VARIANT-SKU-1' }, { sku: 'VARIANT-SKU-2' }] });
   delete p.product;
   const parsed = parseKeywordCampaignPlan(JSON.stringify(p));
 
@@ -314,7 +375,7 @@ test('partial product-ad failure journals progress and resume submits only the m
   const result = await executeKeywordCampaignPlan(resumed, parsed);
   const createCall = resumed.calls.find(({ method, path }) => method === 'POST' && path === '/sp/productAds');
   assert.equal(createCall.opts.body.productAds.length, 1, 'resume must only create the missing product ad');
-  assert.equal(createCall.opts.body.productAds[0].asin, 'B012345679');
+  assert.equal(createCall.opts.body.productAds[0].sku, 'VARIANT-SKU-2');
   assert.equal(resumed.calls.some(({ method, path }) => method === 'POST' && path === '/sp/campaigns'), false);
   assert.equal(Object.keys(result.adIds).length, 2);
   assert.equal(result.state, 'ENABLED');

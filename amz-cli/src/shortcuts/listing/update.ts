@@ -19,8 +19,9 @@ import { readFileSync } from 'node:fs';
 import { AmzError } from '../../internal/errs/errors.js';
 import type { ToolContext, ToolDefinition } from '../../tools/types.js';
 import { resolveMarketplace, strFlag } from '../common.js';
-import { resolveSellerId } from './mine.js';
+import { resolveSellerId, resolveUniqueListingSku } from './mine.js';
 import { isSandboxMode } from '../../internal/client/regions.js';
+import { loadListingSchema } from './schema.js';
 
 interface JsonPatch {
   op: 'add' | 'replace' | 'merge' | 'delete';
@@ -34,7 +35,25 @@ interface ListingConfirmationState {
   region?: string;
   marketplaceId?: string;
   sku?: string;
+  asin?: string;
   currentValues?: Record<string, unknown>;
+  schemaEvidence?: ListingSchemaEvidence;
+}
+
+interface ListingSchemaAttributeEvidence {
+  exists: boolean;
+  editable?: boolean;
+  title?: string;
+}
+
+interface ListingSchemaEvidence {
+  sellerId: string;
+  marketplaceId: string;
+  productType: string;
+  version?: string;
+  checksum: string;
+  requirementsEnforced: string;
+  attributes: Record<string, ListingSchemaAttributeEvidence>;
 }
 
 const PATCH_OPS = new Set<JsonPatch['op']>(['add', 'replace', 'merge', 'delete']);
@@ -181,27 +200,200 @@ function touchedAttributes(patches: JsonPatch[]): string[] {
   return [...names];
 }
 
-async function captureListingState(ctx: ToolContext): Promise<ListingConfirmationState> {
-  if (isSandboxMode()) return { sandbox: true };
-  const patches = parsePatches(ctx.flags);
+function schemaAttributeEvidence(definition: unknown): ListingSchemaAttributeEvidence {
+  if (typeof definition !== 'object' || definition === null || Array.isArray(definition)) {
+    return { exists: true };
+  }
+  const record = definition as Record<string, unknown>;
+  return {
+    exists: true,
+    ...(typeof record['editable'] === 'boolean' ? { editable: record['editable'] } : {}),
+    ...(typeof record['title'] === 'string' ? { title: record['title'] } : {}),
+  };
+}
+
+async function captureListingSchemaEvidence(
+  ctx: ToolContext,
+  patches: JsonPatch[],
+): Promise<ListingSchemaEvidence> {
+  const loaded = await loadListingSchema(ctx);
+  const properties = loaded.schema.properties ?? {};
+  const attributes = Object.fromEntries(
+    touchedAttributes(patches).map((attribute) => [
+      attribute,
+      Object.prototype.hasOwnProperty.call(properties, attribute)
+        ? schemaAttributeEvidence(properties[attribute])
+        : { exists: false },
+    ]),
+  );
+  return {
+    sellerId: loaded.sellerId,
+    marketplaceId: loaded.marketplaceId,
+    productType: loaded.productType,
+    ...(loaded.version ? { version: loaded.version } : {}),
+    checksum: loaded.checksum,
+    requirementsEnforced: loaded.requirementsEnforced,
+    attributes,
+  };
+}
+
+function assertSchemaAllowsPatches(
+  patches: JsonPatch[],
+  evidence: ListingSchemaEvidence | undefined,
+): ListingSchemaEvidence {
+  if (!evidence) {
+    throw new AmzError({
+      type: 'upstream_error',
+      subtype: 'listing.schema_evidence_missing',
+      hintAgent: 'report_to_human',
+      hintHuman: 'Listing 预览没有取得卖家专属 Schema 证据，已停止写入。请重新生成预览。',
+      message: 'seller-specific product type schema evidence is missing',
+      retryable: true,
+    });
+  }
+  for (const attribute of touchedAttributes(patches)) {
+    const checked = evidence.attributes[attribute];
+    if (!checked?.exists) {
+      throw new AmzError({
+        type: 'invalid_param',
+        subtype: 'listing.schema_attribute_not_found',
+        param: '--patches',
+        hintAgent: 'fix_param',
+        hintHuman:
+          `属性 "${attribute}" 不在当前店铺、站点和商品类型的最新 Schema 中，已禁止预览和写入。` +
+          '请先用 inspect_listing_schema 按业务名称搜索真实属性；找不到或匹配多个时询问用户，不得继续猜字段名。',
+        message:
+          `attribute ${attribute} is absent from seller-specific schema ` +
+          `${evidence.productType}@${evidence.marketplaceId}`,
+      });
+    }
+    if (checked.editable === false) {
+      throw new AmzError({
+        type: 'invalid_param',
+        subtype: 'listing.schema_attribute_not_editable',
+        param: '--patches',
+        hintAgent: 'report_to_human',
+        hintHuman:
+          `属性 "${attribute}" 在当前卖家专属 Schema 中明确标记为不可编辑，已禁止预览和写入。` +
+          '请向用户说明本次 Schema 证据，不要更换字段名反复尝试。',
+        message:
+          `attribute ${attribute} is not editable in seller-specific schema ` +
+          `${evidence.productType}@${evidence.marketplaceId}`,
+      });
+    }
+  }
+  return evidence;
+}
+
+function validateListingIdentifier(flags: Record<string, unknown>): void {
+  const sku = strFlag(flags, 'sku')?.trim();
+  const asin = strFlag(flags, 'asin')?.trim();
+  if (!sku && !asin) {
+    throw new AmzError({
+      type: 'invalid_param',
+      subtype: 'listing.missing_identifier',
+      param: '--sku/--asin',
+      hintAgent: 'fix_param',
+      hintHuman: '请提供 SKU 或 ASIN。只有 ASIN 时，程序会先查询当前店铺对应的 SKU；不会猜测。',
+      message: 'listing update requires --sku or --asin',
+    });
+  }
+  if (asin && !/^[A-Z0-9]{10}$/i.test(asin)) {
+    throw new AmzError({
+      type: 'invalid_param',
+      subtype: 'listing.invalid_asin',
+      param: '--asin',
+      hintAgent: 'fix_param',
+      hintHuman: 'ASIN 必须是 10 位字母或数字。请核对商品详情页 /dp/ 后面的编号。',
+      message: `invalid ASIN: ${JSON.stringify(asin)}`,
+    });
+  }
+}
+
+async function resolveListingTarget(ctx: ToolContext): Promise<{
+  sellerId: string;
+  region: string;
+  marketplaceId: string;
+  sku: string;
+  asin?: string;
+}> {
   const mkt = resolveMarketplace(ctx.flags['marketplace']);
+  const state = listingStateFromContext(ctx);
+  if (
+    state.sellerId &&
+    state.region === mkt.region &&
+    state.marketplaceId === mkt.id &&
+    state.sku
+  ) {
+    return {
+      sellerId: state.sellerId,
+      region: state.region,
+      marketplaceId: state.marketplaceId,
+      sku: state.sku,
+      ...(state.asin ? { asin: state.asin } : {}),
+    };
+  }
+
   const sellerId = await resolveSellerId(ctx.flags, mkt.region, ctx.client);
-  const sku = strFlag(ctx.flags, 'sku')!;
-  const current = (await ctx.client.get(
-    `/listings/2021-08-01/items/${encodeURIComponent(sellerId)}/${encodeURIComponent(sku)}`,
-    { marketplaceIds: mkt.id, includedData: 'summaries,attributes' },
-    mkt.region,
-  )) as { attributes?: Record<string, unknown> };
-  const currentValues: Record<string, unknown> = {};
-  for (const name of touchedAttributes(patches)) {
-    currentValues[name] = current.attributes?.[name] ?? '(当前无此属性)';
+  const sku = strFlag(ctx.flags, 'sku')?.trim();
+  const asin = strFlag(ctx.flags, 'asin')?.trim().toUpperCase();
+  if (asin) {
+    const resolved = await resolveUniqueListingSku(ctx.flags, ctx.client, sku);
+    return {
+      sellerId,
+      region: mkt.region,
+      marketplaceId: mkt.id,
+      sku: resolved.sku,
+      asin: resolved.asin,
+    };
   }
   return {
     sellerId,
     region: mkt.region,
     marketplaceId: mkt.id,
-    sku,
+    sku: sku!,
+  };
+}
+
+async function captureListingState(ctx: ToolContext): Promise<ListingConfirmationState> {
+  if (isSandboxMode()) return { sandbox: true };
+  const patches = parsePatches(ctx.flags);
+  const mkt = resolveMarketplace(ctx.flags['marketplace']);
+  const target = await resolveListingTarget(ctx);
+  const [current, schemaEvidence] = await Promise.all([
+    ctx.client.get(
+      `/listings/2021-08-01/items/${encodeURIComponent(target.sellerId)}/${encodeURIComponent(target.sku)}`,
+      { marketplaceIds: mkt.id, includedData: 'summaries,attributes' },
+      mkt.region,
+    ) as Promise<{ attributes?: Record<string, unknown> }>,
+    captureListingSchemaEvidence(ctx, patches),
+  ]);
+  if (
+    schemaEvidence.sellerId !== target.sellerId ||
+    schemaEvidence.marketplaceId !== target.marketplaceId
+  ) {
+    throw new AmzError({
+      type: 'invalid_param',
+      subtype: 'listing.schema_identity_mismatch',
+      hintAgent: 'report_to_human',
+      hintHuman: 'Schema 所属店铺或站点与 Listing 目标不一致，已停止预览。请核对店铺和站点后重试。',
+      message:
+        `schema identity ${schemaEvidence.sellerId}@${schemaEvidence.marketplaceId} ` +
+        `does not match listing target ${target.sellerId}@${target.marketplaceId}`,
+    });
+  }
+  const currentValues: Record<string, unknown> = {};
+  for (const name of touchedAttributes(patches)) {
+    currentValues[name] = current.attributes?.[name] ?? '(当前无此属性)';
+  }
+  return {
+    sellerId: target.sellerId,
+    region: mkt.region,
+    marketplaceId: mkt.id,
+    sku: target.sku,
+    ...(target.asin ? { asin: target.asin } : {}),
     currentValues,
+    schemaEvidence,
   };
 }
 
@@ -217,8 +409,7 @@ async function callPatch(
   opts: { validationPreview: boolean; patches?: JsonPatch[] },
 ): Promise<Record<string, unknown>> {
   const mkt = resolveMarketplace(ctx.flags['marketplace']);
-  const sellerId = await resolveSellerId(ctx.flags, mkt.region, ctx.client);
-  const sku = strFlag(ctx.flags, 'sku')!;
+  const target = await resolveListingTarget(ctx);
   const productType = strFlag(ctx.flags, 'productType')!;
   const patches = opts.patches ?? parsePatches(ctx.flags);
 
@@ -232,7 +423,7 @@ async function callPatch(
   if (opts.validationPreview) query['mode'] = 'VALIDATION_PREVIEW';
 
   const url =
-    `/listings/2021-08-01/items/${encodeURIComponent(sellerId)}/${encodeURIComponent(sku)}` +
+    `/listings/2021-08-01/items/${encodeURIComponent(target.sellerId)}/${encodeURIComponent(target.sku)}` +
     `?${new URLSearchParams(query).toString()}`;
 
   return (await ctx.client.request('PATCH', url, {
@@ -308,7 +499,8 @@ export const listingUpdate: ToolDefinition = {
   roles: ['Product Listing'],
   flags: [
     { name: 'marketplace', desc: '市场,国家码如 US / CA / MX(必填)', required: true },
-    { name: 'sku', desc: '本店铺要修改的 SKU(必填)', required: true },
+    { name: 'sku', desc: '本店铺要修改的 SKU；可与 --asin 一起提供用于交叉核对' },
+    { name: 'asin', desc: '商品 ASIN；程序会先查询本店 SKU，非唯一匹配时停止并要求用户确认' },
     {
       name: 'seller-id',
       desc: '卖家编号(本地模式可省略并读 SELLER_ID;Broker 模式仅用于核对服务端返回值,不能兜底)',
@@ -325,13 +517,18 @@ export const listingUpdate: ToolDefinition = {
     },
   ],
   validate: (flags) => {
+    validateListingIdentifier(flags);
     parsePatches(flags); // 提前校验 JSON 结构,坏参数不消耗 API 调用
   },
   describe: (flags) => {
     const patches = parsePatches(flags);
     const attrs = touchedAttributes(patches);
     return (
-      `修改 ${strFlag(flags, 'marketplace')?.toUpperCase()} 站点 SKU「${strFlag(flags, 'sku')}」的 listing:` +
+      `修改 ${strFlag(flags, 'marketplace')?.toUpperCase()} 站点 ` +
+      (strFlag(flags, 'sku')
+        ? `SKU「${strFlag(flags, 'sku')}」`
+        : `ASIN「${strFlag(flags, 'asin')}」（预览前解析为本店 SKU）`) +
+      ' 的 listing:' +
       `共 ${patches.length} 处改动` +
       (attrs.length ? `,涉及属性:${attrs.join('、')}` : '') +
       `(操作:${patches.map((p) => p.op).join('/')})`
@@ -358,8 +555,7 @@ export const listingUpdate: ToolDefinition = {
   dryRun: async (ctx) => {
     const patches = parsePatches(ctx.flags);
     const mkt = resolveMarketplace(ctx.flags['marketplace']);
-    const sellerId = await resolveSellerId(ctx.flags, mkt.region, ctx.client);
-    const sku = strFlag(ctx.flags, 'sku')!;
+    const target = await resolveListingTarget(ctx);
 
     // 沙盒模式:静态沙盒只匹配预定义参数,拉当前值一步没有对应 mock,
     // 跳过它直接验证 VALIDATION_PREVIEW 链路(沙盒专用 SKU:VALIDATION_VALID / VALIDATION_INVALID)
@@ -368,7 +564,8 @@ export const listingUpdate: ToolDefinition = {
       const validation = await callPatch(ctx, { validationPreview: true });
       assertValidationPassed(validation);
       return {
-        sku,
+        sku: target.sku,
+        ...(target.asin ? { resolvedFromAsin: target.asin } : {}),
         marketplace: mkt.country,
         sandbox: true,
         proposed_patches: patches,
@@ -379,18 +576,29 @@ export const listingUpdate: ToolDefinition = {
     // 规格 §8.2 rule 3:必须先展示当前状态做对照,不能盲改
     // (当前值由框架门禁在预览前通过 confirmationStateSnapshot 拉取并绑定进令牌)
     ctx.progress('· [dry-run 1/2] 载入门禁预读的当前 listing 值做对照...');
-    const currentTouched = listingStateFromContext(ctx).currentValues ?? {};
+    const confirmationState = listingStateFromContext(ctx);
+    const currentTouched = confirmationState.currentValues ?? {};
+    const schemaEvidence = assertSchemaAllowsPatches(patches, confirmationState.schemaEvidence);
 
     ctx.progress('· [dry-run 2/2] 调用官方 VALIDATION_PREVIEW 服务端校验(不落库)...');
     const validation = await callPatch(ctx, { validationPreview: true });
     assertValidationPassed(validation);
 
     return {
-      sku,
+      sku: target.sku,
+      ...(target.asin ? { resolvedFromAsin: target.asin } : {}),
       marketplace: mkt.country,
       changes: {
         current_values: currentTouched,
         proposed_patches: patches,
+      },
+      schemaValidation: {
+        marketplaceId: schemaEvidence.marketplaceId,
+        productType: schemaEvidence.productType,
+        version: schemaEvidence.version,
+        checksum: schemaEvidence.checksum,
+        requirementsEnforced: schemaEvidence.requirementsEnforced,
+        attributes: schemaEvidence.attributes,
       },
       validation,
       next:
@@ -414,13 +622,9 @@ export const listingUpdate: ToolDefinition = {
     let readbackError: string | undefined;
     try {
       const mkt = resolveMarketplace(ctx.flags['marketplace']);
-      // 门禁在执行前刚捕获过身份快照,优先复用,减少一次 Broker 凭证解析
-      const sellerId =
-        listingStateFromContext(ctx).sellerId ??
-        (await resolveSellerId(ctx.flags, mkt.region, ctx.client));
-      const sku = strFlag(ctx.flags, 'sku')!;
+      const target = await resolveListingTarget(ctx);
       immediateReadback = await ctx.client.get(
-        `/listings/2021-08-01/items/${encodeURIComponent(sellerId)}/${encodeURIComponent(sku)}`,
+        `/listings/2021-08-01/items/${encodeURIComponent(target.sellerId)}/${encodeURIComponent(target.sku)}`,
         { marketplaceIds: mkt.id, includedData: 'attributes,issues' },
         mkt.region,
       );
@@ -429,6 +633,10 @@ export const listingUpdate: ToolDefinition = {
     }
     return {
       processingStatus: 'SUBMITTED',
+      sku: listingStateFromContext(ctx).sku ?? strFlag(ctx.flags, 'sku'),
+      ...(listingStateFromContext(ctx).asin
+        ? { resolvedFromAsin: listingStateFromContext(ctx).asin }
+        : {}),
       submission,
       ...(immediateReadback !== undefined ? { immediateReadback } : {}),
       ...(readbackError ? { readbackError } : {}),

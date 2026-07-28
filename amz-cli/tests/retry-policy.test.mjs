@@ -7,9 +7,19 @@ const originalFetch = globalThis.fetch;
 
 afterEach(() => {
   globalThis.fetch = originalFetch;
-  delete process.env.BROKER_URL;
-  delete process.env.TEAM_TOKEN;
-  delete process.env.STORE;
+  for (const key of [
+    'BROKER_URL',
+    'TEAM_TOKEN',
+    'STORE',
+    'LWA_CLIENT_ID',
+    'LWA_CLIENT_SECRET',
+    'LWA_REFRESH_TOKEN',
+    'ADS_CLIENT_ID',
+    'ADS_CLIENT_SECRET',
+    'ADS_REFRESH_TOKEN',
+  ]) {
+    delete process.env[key];
+  }
 });
 
 const credentials = {
@@ -21,6 +31,24 @@ const credentials = {
     };
   },
 };
+
+test('Ads local auth never falls back to SP-API LWA credentials', async () => {
+  process.env.LWA_CLIENT_ID = 'sp-client';
+  process.env.LWA_CLIENT_SECRET = 'sp-secret';
+  process.env.LWA_REFRESH_TOKEN = 'sp-refresh-token';
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls++;
+    throw new Error('fetch must not be called without explicit ADS_* credentials');
+  };
+
+  const client = new AdsClient();
+  await assert.rejects(
+    () => client.request('GET', '/v2/profiles'),
+    (error) => error?.subtype === 'ads.credentials_missing',
+  );
+  assert.equal(calls, 0);
+});
 
 test('non-idempotent POST is not replayed after an ambiguous 5xx', async () => {
   let calls = 0;

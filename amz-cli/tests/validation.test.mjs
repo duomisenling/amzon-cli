@@ -124,6 +124,7 @@ test('keyword campaign dry-run is local and returns a plan-bound preview token w
     assert.equal(output.meta.dry_run, true);
     assert.match(output.meta.preview_token, /^[A-Za-z0-9_-]{43}$/);
     assert.equal(output.data.campaign.campaigns[0].state, 'PAUSED');
+    assert.match(output.data.finalState, /ENABLED/);
     assert.equal(output.data.keywordCount, 2);
     assert.equal(result.stderr.includes('Amazon'), false);
   } finally {

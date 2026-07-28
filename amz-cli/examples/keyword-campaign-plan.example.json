@@ -3,6 +3,7 @@
   "launchId": "replace-with-unique-launch-id",
   "profileId": "123456789012345",
   "region": "na",
+  "marketplace": "US",
   "campaign": {
     "name": "B012345678 manual keywords",
     "dailyBudget": 20,
@@ -15,9 +16,11 @@
   },
   "products": [
     {
+      "sku": "YOUR-STORE-SKU-1",
       "asin": "B012345678"
     },
     {
+      "sku": "YOUR-STORE-SKU-2",
       "asin": "B012345679"
     }
   ],

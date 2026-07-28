@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -26,10 +27,10 @@ afterEach(() => {
   workDir = undefined;
 });
 
-async function connected(factories = {}) {
+async function connected(factories = {}, account = 'default') {
   stateDir = mkdtempSync(join(tmpdir(), 'amz-mcp-writes-state-'));
   process.env.AMZ_CLI_STATE_DIR = stateDir;
-  const server = createAmazonMcpServer(factories);
+  const server = createAmazonMcpServer(factories, account);
   const client = new Client({ name: 'mcp-write-test', version: '1.0.0' });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
@@ -43,10 +44,30 @@ const budgetArgs = {
   dailyBudget: 25,
 };
 
+function installListingSchema(properties = {
+  item_name: { title: 'Item Name', type: 'array', editable: true },
+}) {
+  const bytes = Buffer.from(JSON.stringify({ properties }));
+  globalThis.fetch = async () => new Response(bytes, { status: 200 });
+  return {
+    productType: 'PRODUCT',
+    productTypeVersion: { version: '1.0', latest: true },
+    requirementsEnforced: 'NOT_ENFORCED',
+    schema: {
+      link: { resource: 'https://schema.example.test/product.json' },
+      checksum: createHash('md5').update(bytes).digest('base64'),
+    },
+  };
+}
+
 test('operational write tools are explicit prepare/apply pairs with destructive apply annotations', async () => {
   const { client, server } = await connected();
   try {
     const listed = await client.listTools();
+    const inspectSchema = listed.tools.find((tool) => tool.name === 'inspect_listing_schema');
+    assert.ok(inspectSchema);
+    assert.equal(inspectSchema.annotations.readOnlyHint, true);
+    assert.equal(inspectSchema.annotations.destructiveHint, false);
     for (const base of [
       'listing_update',
       'feed_submit',
@@ -65,6 +86,72 @@ test('operational write tools are explicit prepare/apply pairs with destructive 
       assert.equal(apply.annotations.destructiveHint, true);
       assert.equal(apply.annotations.idempotentHint, false);
     }
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
+
+test('read-only MCP schema inspection resolves a business label to the actual attribute', async () => {
+  process.env.SELLER_ID = 'SELLER123';
+  const definition = installListingSchema({
+    item_name: { title: 'Item Name', type: 'array', editable: true },
+    title_differentiation: {
+      title: 'Item Highlight',
+      description: 'A short product highlight.',
+      type: 'array',
+      editable: true,
+    },
+  });
+  let definitionQuery;
+  const fakeSp = {
+    async get(path, query) {
+      assert.match(path, /\/definitions\/2020-09-01\/productTypes\/PRODUCT$/);
+      definitionQuery = query;
+      return definition;
+    },
+  };
+  const { client, server } = await connected({ spClient: () => fakeSp }, 'shop-a');
+  try {
+    const inspected = await client.callTool({
+      name: 'inspect_listing_schema',
+      arguments: {
+        marketplace: 'US',
+        productType: 'PRODUCT',
+        query: 'highlight',
+      },
+    });
+    assert.equal(inspected.isError, undefined, inspected.content?.[0]?.text);
+    assert.deepEqual(inspected.structuredContent.schema.attributes, ['title_differentiation']);
+    assert.equal(inspected.structuredContent.schema.matches[0].title, 'Item Highlight');
+    assert.equal(definitionQuery.sellerId, 'SELLER123');
+    assert.equal(definitionQuery.requirementsEnforced, 'NOT_ENFORCED');
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
+
+test('operational MCP tools expose and return their fixed account', async () => {
+  const fakeAds = {
+    async request(method, path) {
+      if (method === 'POST' && path === '/sp/campaigns/list') {
+        return { campaigns: [{ campaignId: '9001', name: 'Safe', state: 'PAUSED', budget: { budget: 10 } }] };
+      }
+      throw new Error(`unexpected ${method} ${path}`);
+    },
+  };
+  const { client, server } = await connected({ adsClient: () => fakeAds }, 'shop-a');
+  try {
+    const listed = await client.listTools();
+    const prepare = listed.tools.find((tool) => tool.name === 'prepare_ads_campaign_budget');
+    const apply = listed.tools.find((tool) => tool.name === 'apply_ads_campaign_budget');
+    assert.match(prepare.title, /shop-a/);
+    assert.match(apply.title, /shop-a/);
+
+    const prepared = await client.callTool({ name: 'prepare_ads_campaign_budget', arguments: budgetArgs });
+    assert.equal(prepared.isError, undefined);
+    assert.equal(prepared.structuredContent.account, 'shop-a');
   } finally {
     await client.close();
     await server.close();
@@ -243,9 +330,11 @@ test('listing MCP uses validation preview, binds current attributes, writes once
   process.env.AMZ_MCP_ALLOWED_WRITES = 'listing.update';
   process.env.SELLER_ID = 'SELLER123';
   const calls = [];
+  const schemaDefinition = installListingSchema();
   const fakeSp = {
     async get(path, query, region) {
       calls.push({ method: 'GET', path, query, region });
+      if (path.startsWith('/definitions/2020-09-01/productTypes/')) return schemaDefinition;
       return { attributes: { item_name: [{ value: 'Old title' }] }, issues: [] };
     },
     async request(method, path, opts) {
@@ -264,6 +353,11 @@ test('listing MCP uses validation preview, binds current attributes, writes once
   try {
     const prepared = await client.callTool({ name: 'prepare_listing_update', arguments: args });
     assert.equal(prepared.isError, undefined);
+    assert.equal(prepared.structuredContent.preview.schemaValidation.productType, 'PRODUCT');
+    assert.equal(
+      prepared.structuredContent.preview.schemaValidation.attributes.item_name.editable,
+      true,
+    );
     assert.equal(calls.filter((call) => call.method === 'PATCH').length, 1);
     assert.match(calls.find((call) => call.method === 'PATCH').path, /mode=VALIDATION_PREVIEW/);
 
@@ -277,6 +371,192 @@ test('listing MCP uses validation preview, binds current attributes, writes once
     assert.doesNotMatch(patches[1].path, /mode=VALIDATION_PREVIEW/);
     assert.equal(applied.structuredContent.executed.processingStatus, 'SUBMITTED');
     assert.ok(applied.structuredContent.executed.immediateReadback);
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
+
+test('listing preview token is invalidated when the seller-specific schema changes', async () => {
+  process.env.AMZ_MCP_ALLOW_WRITES = 'true';
+  process.env.AMZ_MCP_ALLOWED_WRITES = 'listing.update';
+  process.env.SELLER_ID = 'SELLER123';
+  let schemaRevision = 1;
+  let formalPatches = 0;
+  function schemaBytes() {
+    return Buffer.from(JSON.stringify({
+      properties: {
+        item_name: {
+          title: 'Item Name',
+          type: 'array',
+          editable: true,
+          description: `schema revision ${schemaRevision}`,
+        },
+      },
+    }));
+  }
+  globalThis.fetch = async () => new Response(schemaBytes(), { status: 200 });
+  const fakeSp = {
+    async get(path) {
+      if (path.startsWith('/definitions/2020-09-01/productTypes/')) {
+        const bytes = schemaBytes();
+        return {
+          productType: 'PRODUCT',
+          productTypeVersion: { version: `1.${schemaRevision}` },
+          requirementsEnforced: 'NOT_ENFORCED',
+          schema: {
+            link: { resource: 'https://schema.example.test/product.json' },
+            checksum: createHash('md5').update(bytes).digest('base64'),
+          },
+        };
+      }
+      return { attributes: { item_name: [{ value: 'Old title' }] }, issues: [] };
+    },
+    async request(_method, path) {
+      if (path.includes('mode=VALIDATION_PREVIEW')) return { status: 'VALID', issues: [] };
+      formalPatches += 1;
+      return { status: 'ACCEPTED', issues: [] };
+    },
+  };
+  const args = {
+    marketplace: 'US',
+    sku: 'SKU-1',
+    productType: 'PRODUCT',
+    patches: [{ op: 'replace', path: '/attributes/item_name', value: [{ value: 'New title' }] }],
+  };
+  const { client, server } = await connected({ spClient: () => fakeSp });
+  try {
+    const prepared = await client.callTool({ name: 'prepare_listing_update', arguments: args });
+    assert.equal(prepared.isError, undefined, prepared.content?.[0]?.text);
+    schemaRevision = 2;
+    const applied = await client.callTool({
+      name: 'apply_listing_update',
+      arguments: { ...args, previewToken: prepared.structuredContent.previewToken },
+    });
+    assert.equal(applied.isError, true);
+    assert.match(applied.content[0].text, /preview_token_mismatch/);
+    assert.equal(formalPatches, 0);
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
+
+test('listing MCP refuses a guessed attribute before Amazon validation preview and issues no token', async () => {
+  process.env.SELLER_ID = 'SELLER123';
+  const schemaDefinition = installListingSchema({
+    item_name: { title: 'Item Name', type: 'array', editable: true },
+  });
+  let patchCalls = 0;
+  const fakeSp = {
+    async get(path) {
+      if (path.startsWith('/definitions/2020-09-01/productTypes/')) return schemaDefinition;
+      if (path.endsWith('/SKU-1')) return { attributes: {}, issues: [] };
+      throw new Error(`unexpected GET ${path}`);
+    },
+    async request() {
+      patchCalls += 1;
+      return { status: 'VALID', issues: [] };
+    },
+  };
+  const args = {
+    marketplace: 'US',
+    sku: 'SKU-1',
+    productType: 'PRODUCT',
+    patches: [{
+      op: 'replace',
+      path: '/attributes/product_highlight',
+      value: [{ value: 'A guessed field' }],
+    }],
+  };
+  const { client, server } = await connected({ spClient: () => fakeSp });
+  try {
+    const prepared = await client.callTool({ name: 'prepare_listing_update', arguments: args });
+    assert.equal(prepared.isError, true);
+    assert.match(prepared.content[0].text, /listing\.schema_attribute_not_found/);
+    assert.match(prepared.content[0].text, /inspect_listing_schema/);
+    assert.equal(prepared.structuredContent?.previewToken, undefined);
+    assert.equal(patchCalls, 0);
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
+
+test('listing MCP resolves an ASIN to one SKU before preview and exposes that SKU', async () => {
+  process.env.SELLER_ID = 'SELLER123';
+  const calls = [];
+  const schemaDefinition = installListingSchema();
+  const fakeSp = {
+    async get(path, query, region) {
+      calls.push({ method: 'GET', path, query, region });
+      if (path.startsWith('/definitions/2020-09-01/productTypes/')) return schemaDefinition;
+      if (path === '/listings/2021-08-01/items/SELLER123') {
+        return { items: [{ sku: 'SKU-FROM-ASIN', summaries: [{ asin: 'B012345678' }] }] };
+      }
+      if (path.endsWith('/SKU-FROM-ASIN')) {
+        return { attributes: { item_name: [{ value: 'Old title' }] }, issues: [] };
+      }
+      throw new Error(`unexpected GET ${path}`);
+    },
+    async request(method, path, opts) {
+      calls.push({ method, path, opts });
+      return { status: 'VALID', issues: [] };
+    },
+  };
+  const args = {
+    marketplace: 'US',
+    asin: 'B012345678',
+    productType: 'PRODUCT',
+    patches: [{ op: 'replace', path: '/attributes/item_name', value: [{ value: 'New title' }] }],
+  };
+  const { client, server } = await connected({ spClient: () => fakeSp });
+  try {
+    const prepared = await client.callTool({ name: 'prepare_listing_update', arguments: args });
+    assert.equal(prepared.isError, undefined, prepared.content?.[0]?.text);
+    assert.equal(prepared.structuredContent.preview.sku, 'SKU-FROM-ASIN');
+    assert.equal(prepared.structuredContent.preview.resolvedFromAsin, 'B012345678');
+    assert.match(calls.find((call) => call.method === 'PATCH').path, /SKU-FROM-ASIN/);
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
+
+test('listing MCP stops and asks the user when an ASIN matches multiple SKUs', async () => {
+  process.env.SELLER_ID = 'SELLER123';
+  let writes = 0;
+  const fakeSp = {
+    async get(path) {
+      if (path === '/listings/2021-08-01/items/SELLER123') {
+        return {
+          items: [
+            { sku: 'SKU-A', summaries: [{ asin: 'B012345678' }] },
+            { sku: 'SKU-B', summaries: [{ asin: 'B012345678' }] },
+          ],
+        };
+      }
+      throw new Error(`unexpected GET ${path}`);
+    },
+    async request() {
+      writes += 1;
+      return { status: 'VALID', issues: [] };
+    },
+  };
+  const args = {
+    marketplace: 'US',
+    asin: 'B012345678',
+    productType: 'PRODUCT',
+    patches: [{ op: 'replace', path: '/attributes/item_name', value: [{ value: 'New title' }] }],
+  };
+  const { client, server } = await connected({ spClient: () => fakeSp });
+  try {
+    const prepared = await client.callTool({ name: 'prepare_listing_update', arguments: args });
+    assert.equal(prepared.isError, true);
+    assert.match(prepared.content[0].text, /listing\.asin_ambiguous/);
+    assert.match(prepared.content[0].text, /SKU-A/);
+    assert.match(prepared.content[0].text, /SKU-B/);
+    assert.equal(writes, 0);
   } finally {
     await client.close();
     await server.close();
@@ -392,8 +672,10 @@ test('a readback failure after an accepted listing submission still reports SUBM
   process.env.AMZ_MCP_ALLOWED_WRITES = 'listing.update';
   process.env.SELLER_ID = 'SELLER123';
   let formalPatchDone = false;
+  const schemaDefinition = installListingSchema();
   const fakeSp = {
-    async get() {
+    async get(path) {
+      if (path.startsWith('/definitions/2020-09-01/productTypes/')) return schemaDefinition;
       if (formalPatchDone) throw new Error('readback boom');
       return { attributes: { item_name: [{ value: 'Old title' }] }, issues: [] };
     },

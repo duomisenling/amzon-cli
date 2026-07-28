@@ -1,9 +1,14 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, test } from 'node:test';
-import { extractAccountArg, loadAccount, loadDotEnvIfPresent } from '../dist/internal/account.js';
+import {
+  extractAccountArg,
+  loadAccount,
+  loadDotEnvIfPresent,
+  parseEnvText,
+} from '../dist/internal/account.js';
 
 const roots = [];
 
@@ -17,6 +22,38 @@ function tempRoot() {
   roots.push(root);
   return root;
 }
+
+test('multi-store account env example is self-contained and has no Broker settings', () => {
+  const account = parseEnvText(
+    readFileSync(join(process.cwd(), 'examples', 'env', 'account.env.example'), 'utf8'),
+  );
+
+  assert.deepEqual(Object.keys(account), [
+    'LWA_CLIENT_ID',
+    'LWA_CLIENT_SECRET',
+    'LWA_REFRESH_TOKEN_NA',
+    'LWA_REFRESH_TOKEN_EU',
+    'LWA_REFRESH_TOKEN_FE',
+    'SELLER_ID_NA',
+    'SELLER_ID_EU',
+    'SELLER_ID_FE',
+    'SP_API_REGION',
+    'SP_API_SANDBOX',
+    'ADS_CLIENT_ID',
+    'ADS_CLIENT_SECRET',
+    'ADS_REFRESH_TOKEN',
+    'ADS_REGION',
+  ]);
+  assert.equal(account.SP_API_REGION, 'na');
+  assert.equal(account.SP_API_SANDBOX, 'false');
+  assert.equal(account.ADS_REGION, 'na');
+  for (const [key, value] of Object.entries(account)) {
+    if (!['SP_API_REGION', 'SP_API_SANDBOX', 'ADS_REGION'].includes(key)) assert.equal(value, '');
+  }
+  for (const forbidden of ['BROKER_URL', 'TEAM_TOKEN', 'STORE']) {
+    assert.equal(forbidden in account, false);
+  }
+});
 
 test('rejects an empty --account= value instead of using the default account', () => {
   const argv = ['node', 'dist/cli.js', '--account=', 'sales', 'stats'];
@@ -109,11 +146,15 @@ test('AMZ_CLI_SKIP_DOTENV disables both project and user config loading', () => 
   assert.equal(env.LWA_CLIENT_ID, undefined);
 });
 
-test('a local account cannot inherit another account region tokens or Seller IDs', () => {
+test('a local account cannot inherit another account application, tokens, or Seller IDs', () => {
   const home = tempRoot();
   const accountDir = join(home, '.amz-cli', 'accounts');
   mkdirSync(accountDir, { recursive: true });
-  writeFileSync(join(accountDir, 'shop-b.env'), 'LWA_REFRESH_TOKEN_NA=shop-b-na\nSELLER_ID_NA=SHOP_B\n');
+  writeFileSync(
+    join(accountDir, 'shop-b.env'),
+    'LWA_CLIENT_ID=shop-b-client\nLWA_CLIENT_SECRET=shop-b-secret\n' +
+      'LWA_REFRESH_TOKEN_NA=shop-b-na\nSELLER_ID_NA=SHOP_B\n',
+  );
 
   const env = {
     LWA_CLIENT_ID: 'shared-client',
@@ -123,6 +164,8 @@ test('a local account cannot inherit another account region tokens or Seller IDs
     SELLER_ID_NA: 'SHOP_A_NA',
     SELLER_ID_EU: 'SHOP_A_EU',
     ADS_REFRESH_TOKEN: 'shop-a-ads',
+    ADS_CLIENT_ID: 'shop-a-ads-client',
+    ADS_CLIENT_SECRET: 'shop-a-ads-secret',
     BROKER_URL: 'https://broker.example.test',
     TEAM_TOKEN: 'team-token',
     STORE: 'SHOP_A',
@@ -130,15 +173,17 @@ test('a local account cannot inherit another account region tokens or Seller IDs
   loadAccount('shop-b', { env, home, stderr: () => {} });
 
   assert.equal(env.LWA_REFRESH_TOKEN_NA, 'shop-b-na');
+  assert.equal(env.LWA_CLIENT_ID, 'shop-b-client');
+  assert.equal(env.LWA_CLIENT_SECRET, 'shop-b-secret');
   assert.equal(env.SELLER_ID_NA, 'SHOP_B');
   assert.equal(env.LWA_REFRESH_TOKEN_EU, undefined);
   assert.equal(env.SELLER_ID_EU, undefined);
   assert.equal(env.ADS_REFRESH_TOKEN, undefined);
+  assert.equal(env.ADS_CLIENT_ID, undefined);
+  assert.equal(env.ADS_CLIENT_SECRET, undefined);
   assert.equal(env.BROKER_URL, undefined);
   assert.equal(env.TEAM_TOKEN, undefined);
   assert.equal(env.STORE, undefined);
-  assert.equal(env.LWA_CLIENT_ID, 'shared-client');
-  assert.equal(env.LWA_CLIENT_SECRET, 'shared-secret');
 });
 
 test('auth whoami passes --region through to the SP-API client and reports it', async () => {

@@ -1,10 +1,37 @@
 # 凭证文件——绝不提交
 .env
 .env.*
+*.env
 !.env.example
 !.env.local.example
+
+# 本机 Agent、npm 与私有交付配置
+/.claude/settings.local.json
+/.agents/
+/.npmrc
+/local-delivery/
+
+# 本机生成的 MCP 配置与安装包
+/amz-cli-mcp*.json
+*.tgz
+
+# 测试/验证跑命令产生的数据(可能含真实店铺数据,绝不提交)
+# 约定输出放 local-delivery/verify-output/(上面已忽略整个 local-delivery/);
+# 以下为双保险,防止输出落在别处
+/verify-output/
+/tmp/
+*.out.json
+*.err.txt
+*.err
 
 # 依赖与产物
 node_modules/
 dist/
 *.log
+*.tsbuildinfo
+coverage/
+.nyc_output/
+
+# 系统文件
+.DS_Store
+Thumbs.db

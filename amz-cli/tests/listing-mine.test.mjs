@@ -35,6 +35,33 @@ test('listing mine --asin queries by ASIN and surfaces the matched store SKUs', 
   assert.equal(calls[0].query.identifiersType, 'ASIN');
   assert.equal(calls[0].query.identifiers, 'B0H2TYPC26');
   assert.deepEqual(result.matchedSkus, ['SKU-A', 'SKU-B']);
+  assert.deepEqual(result.asinSkuMatches, [
+    { asin: 'B0H2TYPC26', skus: ['SKU-A', 'SKU-B'], status: 'AMBIGUOUS' },
+  ]);
+  assert.deepEqual(result.unmatchedAsins, []);
+  assert.deepEqual(result.ambiguousAsins, [{ asin: 'B0H2TYPC26', skus: ['SKU-A', 'SKU-B'] }]);
+});
+
+test('listing mine maps a batch of ASINs to unique, missing, and ambiguous SKUs', async () => {
+  process.env.SELLER_ID = 'SELLER';
+  const { ctx, calls } = contextWith([
+    { sku: 'SKU-A', summaries: [{ asin: 'B0AAAAAAAA' }] },
+    { sku: 'SKU-B1', summaries: [{ asin: 'B0BBBBBBBB' }] },
+    { sku: 'SKU-B2', summaries: [{ asin: 'B0BBBBBBBB' }] },
+  ]);
+  ctx.flags = { marketplace: 'FR', asin: 'B0AAAAAAAA,B0BBBBBBBB,B0CCCCCCCC' };
+
+  const result = await listingMine.execute(ctx);
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].query.identifiers, 'B0AAAAAAAA,B0BBBBBBBB,B0CCCCCCCC');
+  assert.deepEqual(result.asinSkuMatches, [
+    { asin: 'B0AAAAAAAA', skus: ['SKU-A'], status: 'UNIQUE' },
+    { asin: 'B0BBBBBBBB', skus: ['SKU-B1', 'SKU-B2'], status: 'AMBIGUOUS' },
+    { asin: 'B0CCCCCCCC', skus: [], status: 'NOT_FOUND' },
+  ]);
+  assert.deepEqual(result.unmatchedAsins, ['B0CCCCCCCC']);
+  assert.deepEqual(result.ambiguousAsins, [{ asin: 'B0BBBBBBBB', skus: ['SKU-B1', 'SKU-B2'] }]);
 });
 
 test('listing mine --skus keeps SKU identifiersType and omits matchedSkus', async () => {

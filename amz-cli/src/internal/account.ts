@@ -8,6 +8,8 @@ type Env = NodeJS.ProcessEnv;
 // 这些值决定实际访问的店铺。显式选择本地账号时必须先清空，防止账号文件
 // 缺少某一区域配置后，静默继承 shell 或默认 .env 中另一个店铺的值。
 const ACCOUNT_CREDENTIAL_KEYS = [
+  'LWA_CLIENT_ID',
+  'LWA_CLIENT_SECRET',
   'LWA_REFRESH_TOKEN',
   'LWA_REFRESH_TOKEN_NA',
   'LWA_REFRESH_TOKEN_EU',
@@ -16,6 +18,8 @@ const ACCOUNT_CREDENTIAL_KEYS = [
   'SELLER_ID_NA',
   'SELLER_ID_EU',
   'SELLER_ID_FE',
+  'ADS_CLIENT_ID',
+  'ADS_CLIENT_SECRET',
   'ADS_REFRESH_TOKEN',
 ] as const;
 

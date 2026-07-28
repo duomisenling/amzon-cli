@@ -53,6 +53,7 @@ amz-cli inventory list --marketplace US
 amz-cli install --dry-run  # 仅显示当前版本的全局安装计划
 amz-cli config path        # 显示 ~/.amz-cli/.env 的实际路径
 amz-cli config init        # 首次创建空白模板；已有配置绝不覆盖
+amz-cli config mcp --combined --accounts shop-a,shop-b --output .\amz-cli-mcp.json
 ```
 
 ## 基础概念(先读这个)
@@ -67,10 +68,22 @@ amz-cli config init        # 首次创建空白模板；已有配置绝不覆盖
 - Broker 的 `listing mine/sku/schema/update` 要求管理员在服务端配置对应的 `SELLER_ID_<店铺>_<区域>`。Broker 返回值是权威身份；命令行 `--seller-id` 只能核对是否一致，不能在服务端缺配置时兜底。部署时必须先配置并发布 Broker，再让同事更新 CLI;
 - 不传 `--account` = 优先用当前项目的 amz-cli `.env`；没有时回退到 `~/.amz-cli/.env`;
 - 账号不存在会**明确报错**,绝不会静默用默认凭证冒充所选账号。
+- 多店铺写操作推荐运行 `config mcp --combined` 生成一个路由 MCP。每个写工具都必须显式传入允许列表中的 `account`，路由器再交给该店铺的隔离子进程；预览和审批卡必须显示账号，A 店铺令牌不能用于 B 店铺。旧的每店一个固定账号 MCP 仍兼容。
 
 ```powershell
 amz-cli sales stats --account shop-b --marketplace US --days 7
+
+# 推荐：生成一个多店铺路由 MCP JSON(不读取、不输出凭证；已有文件不覆盖)
+amz-cli config mcp --combined --accounts shop-a,shop-b --output .\amz-cli-mcp.json
+
+# 兼容旧模式：生成每店一个固定账号 MCP
+amz-cli config mcp --accounts shop-a,shop-b --output .\amz-cli-mcp-separate.json
+
+# 旧模式中若主 ~/.amz-cli/.env 仍作为默认店铺，再额外包含默认账号
+amz-cli config mcp --include-default --accounts shop-b --output .\amz-cli-mcp.json
 ```
+
+合并模式不允许 `--include-default`：写操作必须使用用户在当前对话中明确的命名店铺，不能回退或猜测默认店铺。只读查询如果当前连续对话已经明确店铺，可直接复用并在结果中说明；没有明确或出现歧义时先追问。
 
 **只读 vs 写操作**:
 - 绝大多数命令是**只读**的——查数据,不改任何东西,随便跑。
@@ -213,9 +226,11 @@ amz-cli listing mine --marketplace US
 amz-cli listing mine --marketplace US --with-issue-severity ERROR
 # 只有 ASIN、想找本店铺对应的 SKU(编辑 listing / 建广告前常用)
 amz-cli listing mine --marketplace DE --asin B0H2TYPC26
+# 多个 ASIN 一次批量解析(最多 20 个，不要逐个查询)
+amz-cli listing mine --marketplace FR --asin "B0AAAAAAAA,B0BBBBBBBB,B0CCCCCCCC"
 ```
 
-`--asin` 按 ASIN 精确查本店铺对应的 SKU,返回里的 `matchedSkus` 直接给出命中的 SKU;`--skus` 和 `--asin` 二选一。一个 ASIN 可能对应多个 SKU,写操作前要据此确认改哪一个。
+`--asin` 按 ASIN 精确查本店铺对应的 SKU，支持一次传 1–20 个逗号分隔的 ASIN。返回里的 `asinSkuMatches` 会逐个给出 `UNIQUE / NOT_FOUND / AMBIGUOUS` 状态和对应 SKU；`matchedSkus` 保留用于兼容旧调用。`--skus` 和 `--asin` 二选一。只有全部 ASIN 都唯一对应一个 SKU 时，才能进入广告或 Listing 写入预览。
 
 需要卖家编号。本地凭证模式在 `.env` 配置 `SELLER_ID=...`(或每次传 `--seller-id`)；Broker 模式必须由管理员配置服务端 `SELLER_ID_<店铺>_<区域>`，本地 flag/env 不作为兜底。
 
@@ -244,6 +259,8 @@ amz-cli listing schema --marketplace US --product-type ROTATING_TRAY --attribute
 
 `--grep` 不只匹配属性名，也会搜索每个属性定义中的字符串元数据，并返回命中的属性名、路径和文本摘要。例如某些 schema 的属性名可能是 `title_differentiation`，但字段 `title` 才显示为 `Item Highlight`；此时 `--grep highlight` 也能找到它。找到后仍应使用 `--attribute <实际属性名>` 查看完整结构。
 
+MCP 中对应的只读工具是 `inspect_listing_schema`：用 `query` 按“Item Highlights/商品亮点”等业务名称搜索，用 `attribute` 读取唯一匹配属性的完整定义。查不到或匹配多个时应询问用户，不能更换几个猜测名称反复尝试。
+
 两个进阶参数:
 - `--requirements-enforced`:默认 `NOT_ENFORCED`(适合改单个字段的局部 patch,不把完整提交的全部必填约束套上来);要检查完整提交时显式传 `ENFORCED`;
 - `--parentage-level`:有变体时传 `NONE / CHILD / PARENT`,拿到对应层级更准确的结构。
@@ -267,12 +284,13 @@ amz-cli listing update ... --confirm --preview-token <preview_token>
 Patch 本地规则：
 
 - `add`、`replace`、`merge` 必须提供对象数组 `value`；缺少时不会调用 Amazon。
+- 正式环境每次预览都会先强制获取当前卖家、站点和商品类型的最新 Schema：属性不存在或明确 `editable=false` 时，不调用 `VALIDATION_PREVIEW`、不生成预览令牌；Schema 版本或校验值变化后，旧令牌自动失效。
 - `merge` 按 Amazon 当前官方能力只允许 `/attributes/fulfillment_availability` 和 `/attributes/purchasable_offer`；其他属性请使用 schema 支持的 `add`/`replace`，并走官方 `VALIDATION_PREVIEW`。
 - `delete` 是否需要带选择器 `value` 取决于属性 schema；CLI 不一刀切，由当前产品类型 schema 和官方预览判断。
 
 遇到预览错误时，以本次响应的 `issues` 和当前 schema 为准：
 - **8560** 可能与商品身份信息不足有关，但不能无条件添加 `merchant_suggested_asin`。只有当前 schema 确实包含该字段、ASIN 已核对且 issues 指向此类缺失时，才按 schema 结构补充后重新预览；
-- **100476** 表示当前提交的属性不受支持时，不要只靠缩短标题反复提交。先确认标题符合 Amazon 公告的 ≤75 字符要求，再检查当前 schema 是否实际开放 Item Highlights；查不到对应字段就停止并向用户说明。
+- **100476** 表示当前提交的属性不受支持时，不要只靠缩短标题反复提交。先确认标题符合 Amazon 公告的 ≤75 字符要求，再查询卖家专属 Schema 是否实际开放 Item Highlights。只有业务名称搜索无匹配，或唯一匹配属性明确 `editable=false`，才能说明当前 API Schema 不支持；试过几个猜测字段名不能作为结论。
 
 ---
 
@@ -479,14 +497,14 @@ amz-cli ads report-run --profile-id <ID> --type <预设> --start 2026-07-01 --en
 
 ### 写 🔒:建广告 / 启停 / 调预算 / 调竞价 / 否定词
 
-`campaign-create` 只创建 Campaign 外壳；完整手动关键词广告使用 `keyword-campaign-launch`。后者会创建 Campaign、Ad Group、Product Ad 和正向 Keyword，并在完整回读成功后按方案决定是否启用。
+`campaign-create` 只创建 Campaign 外壳；完整手动关键词广告使用 `keyword-campaign-launch`。示例方案默认 `enableAfterCreate=true`：一次预览和审批会创建 Campaign、Ad Group、Product Ad 和正向 Keyword，并在完整回读成功后自动启用。只有明确需要暂不投放时才改为 `false`。
 
 ```powershell
 # 建广告活动(默认创建为暂停状态,不花钱;启用必须另走 campaign-state 的独立预览)
 amz-cli ads campaign-create --profile-id <ID> --name "活动名" --targeting-type AUTO --daily-budget 10 --start 2026-08-01 --dry-run
 amz-cli ads campaign-create ... --confirm --preview-token <preview_token>
 
-# 用固定 JSON 方案创建完整手动关键词广告
+# 用固定 JSON 方案创建完整手动关键词广告；示例默认完整创建后立即投放
 Copy-Item examples\keyword-campaign-plan.example.json .\my-keyword-campaign.json
 # 编辑方案并逐项核对 profileId/region/ASIN或SKU/预算/关键词/匹配方式/竞价/enableAfterCreate
 amz-cli ads keyword-campaign-launch --plan .\my-keyword-campaign.json --dry-run
@@ -511,7 +529,7 @@ amz-cli ads negative-keyword ... --confirm --preview-token <preview_token>
 
 典型广告优化循环:`report-run --type search-terms` 找废词 → `negative-keyword` 否掉 / `keyword-bid` 降竞价 / `campaign-budget` 给表现好的加预算。
 
-完整关键词广告方案格式见 `examples/keyword-campaign-plan.example.json`。`launchId` 必须是本次发布的唯一编号；方案要求 1–1000 个关键词，同一关键词文本与匹配方式不能重复。`products` 是商品数组（1–20 个，如同一商品的多个变体），每个商品的 `asin` 和 `sku` 必须二选一、不能重复；同一广告组内的所有商品共享同一套关键词与竞价。旧格式的单个 `product` 对象仍然兼容（自动视为一个商品的 `products`）。`enableAfterCreate=true` 并不表示一创建 Campaign 就花钱：执行顺序固定为 PAUSED Campaign → 广告组 → 全部商品广告（一次数组调用）→ 分批创建关键词 → 逐条回读核对 ID/归属/数量 → 最后启用。
+完整关键词广告方案格式见 `examples/keyword-campaign-plan.example.json`。正常“新建/创建广告”使用 `enableAfterCreate=true`，一次预览和审批覆盖创建及最终启用；只有明确要求“保持暂停/暂不投放”时才使用 `false`。`launchId` 必须是本次发布的唯一编号，方案内容发生任何变化（包括 ASIN 改成 SKU）后都必须换新 `launchId` 并重新预览；不得删除本地日志强行复用。方案必须明确 `marketplace`，且与 `region` 一致。方案要求 1–1000 个关键词，同一关键词文本与匹配方式不能重复。`products` 是商品数组（1–20 个，如同一商品的多个变体），每项的 `sku` 必填且不能重复；`asin` 仅可作为预览核对字段，不会发送给 Amazon Ads。旧格式的单个 `product` 对象仍兼容，但其中也必须提供 SKU。同一广告组内的所有商品共享同一套关键词与竞价。MCP 预览和正式写入前都会用店铺 Listings 数据核实 SKU；失败时不会创建 Campaign。`enableAfterCreate=true` 并不表示残缺广告会投放：执行顺序固定为 SKU 前置校验 → PAUSED Campaign → 广告组 → 全部商品广告（一次数组调用）→ 分批创建关键词 → 逐条回读核对 ID/归属/数量 → 最后启用。任何部分失败都保持暂停。
 
 Amazon Ads 批量创建可能返回 `207 Multi-Status`。CLI 会逐项读取 `success/error`：部分失败时保留已成功 ID、Campaign 保持暂停；同一方案再次确认后只补缺项。写请求网络超时或结果不明确时不会自动重放，而是要求先到后台或用只读命令核对。
 
@@ -552,7 +570,7 @@ MCP 正式写入还受 `AMZ_MCP_ALLOWED_WRITES` 操作白名单限制。预算�
 
 安全边界说明：TTY、确认码和本地 preview token 主要防误操作，不能证明终端背后一定是真人，也不能阻止同权限恶意程序伪造本地状态或直接使用 Amazon bearer token。生产环境若要求“Agent 技术上绝不能写”，必须使用独立只读 Amazon 凭证，或由隔离的审批代理持有写凭证并代理写请求。
 
-另一道保险:广告创建默认是**暂停状态**,就算确认执行了也不花钱,启用才开始投放。
+另一道保险:完整广告在结构创建和回读核对期间始终是**暂停状态**；只有全部成功且本次审批预览的最终状态为 ENABLED 时才开始投放，任何部分失败都不会自动启用。
 
 ---
 

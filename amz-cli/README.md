@@ -19,9 +19,13 @@ npx amz-cli@latest install --dry-run  # 可选：先看安装计划，不改系�
 npx amz-cli@latest install
 amz-cli --version
 amz-cli config path
+# 管理员生成一次 Windows 便携多店铺 MCP；同事安装同版本后可直接导入
+amz-cli config mcp --combined --portable --accounts shop-a,shop-b,shop-c,shop-d,shop-e --output .\amz-cli-mcp.json
 ```
 
 安装器会锁定同一个 npm 版本，同时安装全局 `amz-cli` / `amz-cli-mcp` 命令和 Agent Skill，并在首次安装时创建不含真实凭证的 `~/.amz-cli/.env` 模板；已有配置绝不覆盖。首次 npm 版本发布前若返回 404，请暂时使用下方“源码开发与应急安装”。
+
+`--portable` 生成的 Windows JSON 不包含管理员电脑的 Node、用户名或项目绝对路径，可以直接发给同事导入。每台同事电脑仍需先安装同版本 `amz-cli`、放好对应的 `~/.amz-cli/accounts/<店铺>.env`，并在安装后重启 Cherry Studio；JSON 只负责 MCP 启动配置，不包含程序或 Amazon 凭证。
 
 完整的 Cherry Studio、凭证、测试和更新步骤见[安装指南](docs/CHERRY_STUDIO_INSTALL.md)。
 
@@ -90,7 +94,7 @@ src/
 - **stderr** 输出进度与错误 JSON:`{ok:false, error:{type, subtype, hint_agent, hint_human, ...}}`
 - exit code 由错误 type 派生:参数错=2,凭证/权限=3,限流=4,上游=1,内部=5,需确认=10
 - 写操作必须 `--dry-run` 预览 → 人工确认 → `--confirm --preview-token <预览令牌>` 执行。令牌 15 分钟有效、只能使用一次，并且绑定命令、全部业务参数、Feed/patch 内容哈希、当前店铺、Seller ID、区域、凭证环境，以及 Listing/预算/竞价等预览所依据的远端当前状态；确认时任一项变化都会拒绝执行。
-- Cherry Studio 可选用 `amz-cli-mcp`：Listing、Feed 和运营广告写操作均提供 `prepare_*` 预览与 `apply_*` 正式执行工具；完整关键词广告沿用 `prepare_keyword_campaign` / `launch_keyword_campaign`。正式工具必须逐次人工审批，MCP 写入默认关闭并受 `AMZ_MCP_ALLOWED_WRITES` 白名单限制；不得使用 `bypassPermissions` 或自动批准。
+- Cherry Studio 可选用 `amz-cli-mcp`：Listing、Feed 和运营广告写操作均提供 `prepare_*` 预览与 `apply_*` 正式执行工具；完整关键词广告沿用 `prepare_keyword_campaign` / `launch_keyword_campaign`。多店铺推荐用 `amz-cli config mcp --combined --accounts ...` 生成一个路由 MCP：所有写工具的 `account` 都是必填项，外层按账号路由到隔离的固定店铺子进程；预览令牌绑定账号，跨店执行会被拒绝。旧的每店一个 MCP 配置继续兼容。正式工具必须逐次人工审批，MCP 写入默认关闭并受 `AMZ_MCP_ALLOWED_WRITES` 白名单限制；不得使用 `bypassPermissions` 或自动批准。
 - 429 和安全的只读请求可自动退避重试；POST/PUT 写请求遇到 5xx 不自动重放，因为结果可能已经生效，必须先查询后台核对。
 - 网络请求都有截止时间：Broker/LWA 30 秒、普通 SP-API/Ads API 60 秒、文件上传下载 120 秒，防止进程永久卡住。
 - CLI 门禁用于防止误操作和普通非交互自动化，不是对同一电脑上恶意程序的强安全边界。若 Agent 能读取具写权限的 Amazon access token 或控制伪终端，必须依靠独立只读凭证或外部人工审批服务隔离。

@@ -11,9 +11,11 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { z } from 'zod';
 import { ADS_CONTENT_TYPES, type AdsClient } from '../../internal/client/ads-client.js';
+import type { SpApiClient } from '../../internal/client/client.js';
 import { AmzError } from '../../internal/errs/errors.js';
 import type { ToolContext, ToolDefinition } from '../../tools/types.js';
-import { strFlag } from '../common.js';
+import { resolveMarketplace, strFlag } from '../common.js';
+import { resolveSellerId } from '../listing/mine.js';
 import { setCampaignState } from './campaign-state.js';
 
 const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'must use YYYY-MM-DD');
@@ -25,16 +27,20 @@ const keywordSchema = z.object({
   bid: positiveMoney,
 });
 
-const productSchema = z
-  .object({
-    asin: z.string().trim().toUpperCase().regex(/^[A-Z0-9]{10}$/).optional(),
-    sku: z.string().trim().min(1).optional(),
-  })
-  .superRefine((value, ctx) => {
-    if (Boolean(value.asin) === Boolean(value.sku)) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'provide exactly one of asin or sku' });
-    }
-  });
+const productSchema = z.object({
+  sku: z
+    .string()
+    .trim()
+    .min(1)
+    .describe('本店铺 merchant SKU。必填；只有 ASIN 时必须先用 listing mine 批量解析，不能把 ASIN 直接用于广告写入。'),
+  asin: z
+    .string()
+    .trim()
+    .toUpperCase()
+    .regex(/^[A-Z0-9]{10}$/)
+    .optional()
+    .describe('可选，仅用于预览时核对 ASIN→SKU 映射；不会发送到 Amazon Ads 商品广告写接口。'),
+});
 
 /** 兼容旧方案:单个 product 归一为 products 数组,业务代码只处理数组一种形态。 */
 function normalizeLegacyProduct(value: unknown): unknown {
@@ -54,6 +60,11 @@ const keywordCampaignPlanObject = z
     launchId: z.string().regex(/^[A-Za-z0-9_-]{8,64}$/),
     profileId: z.string().regex(/^\d+$/),
     region: z.enum(['na', 'eu', 'fe']),
+    marketplace: z
+      .string()
+      .trim()
+      .min(2)
+      .describe('商品所在站点国家码或 marketplaceId，例如 FR / DE / US；必须与广告 region 一致。'),
     campaign: z.object({
       name: z.string().trim().min(1).max(128),
       dailyBudget: positiveMoney,
@@ -66,7 +77,8 @@ const keywordCampaignPlanObject = z
       defaultBid: positiveMoney,
     }),
     // 官方 POST /sp/productAds 本就接收数组;同一广告组的多商品(如变体)共享
-    // 关键词与竞价。上限 20 是"预览必须可人工核对"的保守值,远低于接口上限。
+    // 关键词与竞价。广告写入只接受已解析并核实的本店 SKU；ASIN 只能作为预览参考。
+    // 上限 20 是"预览必须可人工核对"的保守值,远低于接口上限。
     products: z.array(productSchema).min(1).max(20),
     keywords: z.array(keywordSchema).min(1).max(1000),
     enableAfterCreate: z.boolean(),
@@ -95,7 +107,7 @@ const keywordCampaignPlanObject = z
     });
     const seenProducts = new Set<string>();
     plan.products.forEach((product, index) => {
-      const key = product.asin ? `asin:${product.asin}` : `sku:${product.sku}`;
+      const key = product.sku;
       if (seenProducts.has(key)) {
         ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['products', index], message: 'duplicate product' });
       }
@@ -106,6 +118,83 @@ const keywordCampaignPlanObject = z
 export const keywordCampaignPlanSchema = z.preprocess(normalizeLegacyProduct, keywordCampaignPlanObject);
 
 export type KeywordCampaignPlan = z.infer<typeof keywordCampaignPlanObject>;
+
+export interface KeywordCampaignProductPreflight {
+  marketplace: string;
+  verifiedProducts: Array<{ sku: string; asin?: string }>;
+}
+
+export interface CampaignProductSelection {
+  marketplace: string;
+  region: 'na' | 'eu' | 'fe';
+  products: Array<{ sku: string; asin?: string }>;
+}
+
+/**
+ * 在任何 Ads 写请求之前，使用店铺自己的 Listings 数据核实全部 SKU。
+ * 这道门禁不负责从 ASIN 猜 SKU：只有 ASIN 时必须先用 listing mine 做显式映射。
+ */
+export async function preflightKeywordCampaignProducts(
+  client: SpApiClient,
+  plan: KeywordCampaignPlan,
+): Promise<KeywordCampaignProductPreflight> {
+  return preflightCampaignProducts(client, plan);
+}
+
+/** 供“新建整套广告”和“扩展已有广告”共同使用的店铺 SKU 归属校验。 */
+export async function preflightCampaignProducts(
+  client: SpApiClient,
+  plan: CampaignProductSelection,
+): Promise<KeywordCampaignProductPreflight> {
+  const marketplace = resolveMarketplace(plan.marketplace);
+  if (marketplace.region !== plan.region) {
+    throw invalidPlan(
+      `站点 ${marketplace.country} 属于 ${marketplace.region} 区域，但方案 region=${plan.region}；请修正后重新预览`,
+    );
+  }
+
+  if (plan.products.length === 0) {
+    return { marketplace: marketplace.country, verifiedProducts: [] };
+  }
+
+  const sellerId = await resolveSellerId({}, marketplace.region, client);
+  const requestedSkus = plan.products.map((product) => product.sku);
+  const response = (await client.get(
+    `/listings/2021-08-01/items/${encodeURIComponent(sellerId)}`,
+    {
+      marketplaceIds: marketplace.id,
+      includedData: 'summaries,issues',
+      identifiers: requestedSkus.join(','),
+      identifiersType: 'SKU',
+      pageSize: requestedSkus.length,
+    },
+    marketplace.region,
+  )) as { items?: Array<Record<string, unknown>> };
+
+  const foundSkus = new Set(
+    (response.items ?? [])
+      .map((item) => item['sku'])
+      .filter((sku): sku is string => typeof sku === 'string' && sku.length > 0),
+  );
+  const missingSkus = requestedSkus.filter((sku) => !foundSkus.has(sku));
+  if (missingSkus.length > 0) {
+    throw new AmzError({
+      type: 'invalid_param',
+      subtype: 'ads.keyword_campaign_sku_not_in_store',
+      param: 'products[].sku',
+      hintAgent: 'fix_param',
+      hintHuman:
+        `以下 SKU 不在当前店铺的 ${marketplace.country} 站 Listing 中：${missingSkus.join('、')}。` +
+        '请先用 listing mine 按 ASIN 批量解析本店 SKU；不要创建 Campaign，也不要猜测 SKU。',
+      message: `keyword campaign contains SKUs not found in ${marketplace.country}: ${missingSkus.join(',')}`,
+    });
+  }
+
+  return {
+    marketplace: marketplace.country,
+    verifiedProducts: plan.products.map(({ sku, asin }) => ({ sku, ...(asin ? { asin } : {}) })),
+  };
+}
 
 type LaunchStatus =
   | 'PLANNED'
@@ -328,6 +417,7 @@ export function keywordCampaignPreview(plan: KeywordCampaignPlan): Record<string
     launchId: plan.launchId,
     profileId: plan.profileId,
     region: plan.region,
+    marketplace: plan.marketplace,
     campaign: campaignPayload(plan),
     adGroup: { name: plan.adGroup.name, defaultBid: plan.adGroup.defaultBid, state: 'ENABLED' },
     products: plan.products.map((product) => ({ ...product, state: 'ENABLED' })),
@@ -385,7 +475,7 @@ async function verifyCreatedObjects(client: AdsClient, plan: KeywordCampaignPlan
 
   const campaign = campaignResponse?.campaigns?.[0];
   const adGroup = adGroupResponse?.adGroups?.[0];
-  // 逐条核对每个商品广告:adId 落在本 campaign/adGroup 下,且 asin/sku 与方案同下标商品一致
+  // 逐条核对每个商品广告:adId 落在本 campaign/adGroup 下,且 SKU 与方案同下标商品一致
   const adsById = new Map(
     (productAdResponse?.productAds ?? []).map((ad) => [String(ad['adId']), ad]),
   );
@@ -398,7 +488,7 @@ async function verifyCreatedObjects(client: AdsClient, plan: KeywordCampaignPlan
       product &&
       String(ad['campaignId']) === journal.campaignId &&
       String(ad['adGroupId']) === journal.adGroupId &&
-      String(ad[product.asin ? 'asin' : 'sku']) === (product.asin ?? product.sku)
+      String(ad['sku']) === product.sku
     ) {
       verifiedProducts += 1;
     }
@@ -501,7 +591,7 @@ export async function executeKeywordCampaignPlan(
           productAds: pendingProducts.map(({ product }) => ({
             campaignId: journal.campaignId,
             adGroupId: journal.adGroupId,
-            ...product,
+            sku: product.sku,
             state: 'ENABLED',
           })),
         },
@@ -626,7 +716,7 @@ export const adsKeywordCampaignLaunch: ToolDefinition = {
   },
   describe: (flags) => {
     const plan = readPlanFile(flags).plan;
-    const labels = plan.products.map((product) => product.asin ?? product.sku);
+    const labels = plan.products.map((product) => product.sku);
     const productSummary =
       labels.length <= 3 ? labels.join('、') : `${labels.slice(0, 3).join('、')} 等 ${labels.length} 个`;
     return `在 profile ${plan.profileId}/${plan.region} 创建“${plan.campaign.name}”，商品 ${productSummary}，` +
@@ -639,6 +729,12 @@ export const adsKeywordCampaignLaunch: ToolDefinition = {
       input: plan,
     };
   },
+  // CLI dry-run 保持离线可用；正式 CLI 执行和 MCP prepare/launch 都会在首个 Ads 写请求前核实 SKU。
   dryRun: async (ctx) => keywordCampaignPreview(planFromContext(ctx)),
-  execute: async (ctx) => executeKeywordCampaignPlan(ctx.adsClient, planFromContext(ctx), ctx.progress),
+  execute: async (ctx) => {
+    const plan = planFromContext(ctx);
+    // 必须在 loadJournal 和第一个 Ads 写请求之前完成，避免无效 SKU 留下 PAUSED 空壳 Campaign。
+    await preflightKeywordCampaignProducts(ctx.client, plan);
+    return executeKeywordCampaignPlan(ctx.adsClient, plan, ctx.progress);
+  },
 };

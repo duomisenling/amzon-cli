@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { afterEach, test } from 'node:test';
 import { listingUpdate } from '../dist/shortcuts/listing/update.js';
-import { resolveSellerId } from '../dist/shortcuts/listing/mine.js';
+import { resolveSellerId, resolveUniqueListingSku } from '../dist/shortcuts/listing/mine.js';
 
 afterEach(() => {
   delete process.env.SELLER_ID;
@@ -26,6 +26,23 @@ function context(patches, validation) {
     ctx: {
       flags: flags(patches),
       progress: () => {},
+      confirmationState: {
+        currentValues: {},
+        schemaEvidence: {
+          sellerId: 'SELLER',
+          marketplaceId: 'ATVPDKIKX0DER',
+          productType: 'PRODUCT',
+          version: '1.0',
+          checksum: 'test-checksum',
+          requirementsEnforced: 'NOT_ENFORCED',
+          attributes: Object.fromEntries(
+            patches.map((patch) => [
+              patch.path.split('/')[2],
+              { exists: true, editable: true },
+            ]),
+          ),
+        },
+      },
       client: {
         get: async () => ({ attributes: {} }),
         request: async (method, path, opts) => {
@@ -42,6 +59,64 @@ test('accepts the official top-level patch shape', () => {
     listingUpdate.validate(flags([
       { op: 'replace', path: '/attributes/item_name', value: [{ value: 'New name' }] },
     ])),
+  );
+});
+
+test('listing update accepts SKU, ASIN, or both, but never neither', () => {
+  const patches = [{ op: 'replace', path: '/attributes/item_name', value: [{ value: 'New name' }] }];
+  const byAsin = flags(patches);
+  delete byAsin.sku;
+  byAsin.asin = 'B012345678';
+  assert.doesNotThrow(() => listingUpdate.validate(byAsin));
+
+  const crossChecked = flags(patches);
+  crossChecked.asin = 'B012345678';
+  assert.doesNotThrow(() => listingUpdate.validate(crossChecked));
+
+  const missing = flags(patches);
+  delete missing.sku;
+  assert.throws(
+    () => listingUpdate.validate(missing),
+    (error) => error?.subtype === 'listing.missing_identifier',
+  );
+});
+
+test('ASIN resolution requires a unique store SKU and cross-checks an explicit SKU', async () => {
+  process.env.SELLER_ID = 'SELLER';
+  const baseFlags = { marketplace: 'DE', asin: 'B012345678' };
+  const client = {
+    async get() {
+      return {
+        items: [
+          { sku: 'SKU-A', summaries: [{ asin: 'B012345678' }] },
+          { sku: 'SKU-B', summaries: [{ asin: 'B012345678' }] },
+        ],
+      };
+    },
+  };
+
+  await assert.rejects(
+    () => resolveUniqueListingSku(baseFlags, client),
+    (error) => error?.subtype === 'listing.asin_ambiguous',
+  );
+  assert.deepEqual(
+    await resolveUniqueListingSku(baseFlags, client, 'SKU-B'),
+    { asin: 'B012345678', sku: 'SKU-B' },
+  );
+  await assert.rejects(
+    () => resolveUniqueListingSku(baseFlags, client, 'SKU-C'),
+    (error) => error?.subtype === 'listing.asin_sku_mismatch',
+  );
+});
+
+test('ASIN resolution asks for correction when the listing is not found', async () => {
+  process.env.SELLER_ID = 'SELLER';
+  await assert.rejects(
+    () => resolveUniqueListingSku(
+      { marketplace: 'DE', asin: 'B012345678' },
+      { get: async () => ({ items: [] }) },
+    ),
+    (error) => error?.subtype === 'listing.asin_not_found' && /核对店铺、站点和 ASIN/.test(error.hintHuman),
   );
 });
 
@@ -165,6 +240,42 @@ test('VALID status with an ERROR issue is still rejected', async () => {
     () => listingUpdate.dryRun(ctx),
     (error) => error?.subtype === 'listing.validation_failed',
   );
+});
+
+test('seller-specific schema blocks an unknown attribute before validation preview', async () => {
+  process.env.SELLER_ID = 'SELLER';
+  const { ctx, requests } = context(
+    [{ op: 'replace', path: '/attributes/product_highlight', value: [{ value: 'Guess' }] }],
+    { status: 'VALID', issues: [] },
+  );
+  ctx.confirmationState.schemaEvidence.attributes.product_highlight = { exists: false };
+
+  await assert.rejects(
+    () => listingUpdate.dryRun(ctx),
+    (error) =>
+      error?.subtype === 'listing.schema_attribute_not_found' &&
+      /inspect_listing_schema/.test(error.hintHuman),
+  );
+  assert.equal(requests.length, 0);
+});
+
+test('seller-specific schema blocks an explicitly non-editable attribute before preview', async () => {
+  process.env.SELLER_ID = 'SELLER';
+  const { ctx, requests } = context(
+    [{ op: 'replace', path: '/attributes/item_name', value: [{ value: 'New name' }] }],
+    { status: 'VALID', issues: [] },
+  );
+  ctx.confirmationState.schemaEvidence.attributes.item_name = {
+    exists: true,
+    editable: false,
+    title: 'Item Name',
+  };
+
+  await assert.rejects(
+    () => listingUpdate.dryRun(ctx),
+    (error) => error?.subtype === 'listing.schema_attribute_not_editable',
+  );
+  assert.equal(requests.length, 0);
 });
 
 test('successful preview uses VALIDATION_PREVIEW and requests identifiers', async () => {

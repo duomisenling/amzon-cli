@@ -7,9 +7,11 @@ import {
 import { AmzError } from '../internal/errs/errors.js';
 import { adsCampaignBudget } from '../shortcuts/ads/campaign-budget.js';
 import { adsCampaignCreate } from '../shortcuts/ads/campaign-create.js';
+import { adsCampaignExtend, campaignExtensionPlanSchema } from '../shortcuts/ads/campaign-extend.js';
 import { adsCampaignState } from '../shortcuts/ads/campaign-state.js';
 import { adsKeywordBid, adsNegativeKeyword } from '../shortcuts/ads/keywords.js';
 import { feedSubmit } from '../shortcuts/feed/commands.js';
+import { listingSchema } from '../shortcuts/listing/schema.js';
 import { listingUpdate } from '../shortcuts/listing/update.js';
 import {
   applyConfirmedCapture,
@@ -67,11 +69,14 @@ const registrations: WriteRegistration[] = [
     applyName: 'apply_listing_update',
     prepareTitle: '预览 Listing 修改',
     applyTitle: '执行 Listing 修改',
-    description: '修改单个 SKU 的 Listing 属性；预览会调用 Amazon VALIDATION_PREVIEW，但不会落库。',
+    description:
+      '修改单个 Listing。可提供 SKU、ASIN 或两者；ASIN 会先解析并核对本店 SKU，' +
+      '查不到、匹配多个或两者不一致时停止并要求用户确认。预览会显示最终 SKU，且不会落库。',
     tool: listingUpdate,
     inputShape: {
       marketplace: nonEmpty,
-      sku: nonEmpty,
+      sku: nonEmpty.optional(),
+      asin: nonEmpty.regex(/^[A-Za-z0-9]{10}$/).optional(),
       sellerId: nonEmpty.optional(),
       productType: nonEmpty,
       patches: z.array(patchSchema).min(1),
@@ -79,6 +84,7 @@ const registrations: WriteRegistration[] = [
     toFlags: (args) => ({
       marketplace: args['marketplace'],
       sku: args['sku'],
+      asin: args['asin'],
       sellerId: args['sellerId'],
       productType: args['productType'],
       patches: JSON.stringify(args['patches']),
@@ -117,6 +123,19 @@ const registrations: WriteRegistration[] = [
     },
     toFlags: (args) => strings(args, ['dailyBudget']),
     prepareOpenWorld: false,
+  },
+  {
+    operation: 'ads.campaign-extend',
+    prepareName: 'prepare_ads_campaign_extend',
+    applyName: 'apply_ads_campaign_extend',
+    prepareTitle: '预览向已有广告活动追加商品和关键词',
+    applyTitle: '向已有广告活动追加商品和关键词',
+    description:
+      '向明确的现有 Campaign/广告组追加本店 SKU 商品广告和正向关键词；只创建缺项，不修改活动状态、预算或已有竞价。',
+    tool: adsCampaignExtend,
+    inputShape: { plan: campaignExtensionPlanSchema },
+    toFlags: (args) => ({ plan: JSON.stringify(args['plan']) }),
+    prepareOpenWorld: true,
   },
   {
     operation: 'ads.campaign-state',
@@ -210,14 +229,57 @@ function ensureDryRun(tool: ToolDefinition): NonNullable<ToolDefinition['dryRun'
 export function registerOperationalWriteTools(
   server: McpServer,
   factories: ToolClientFactories = {},
+  account: string = 'default',
 ): void {
+  server.registerTool(
+    'inspect_listing_schema',
+    {
+      title: `【${account}】查询 Listing 可编辑属性`,
+      description:
+        `固定店铺：${account}。只读查询当前卖家、站点和商品类型的最新 Product Type Definition。` +
+        '当用户用业务名称提出 Listing 修改时，先用 query 搜索显示名称和说明，取得真实属性名及定义；' +
+        '查不到或匹配多个时询问用户，不得猜字段名。prepare_listing_update 还会再次强制核对。',
+      inputSchema: {
+        marketplace: nonEmpty,
+        productType: nonEmpty,
+        sellerId: nonEmpty.optional(),
+        query: nonEmpty.optional(),
+        attribute: nonEmpty.optional(),
+        parentageLevel: z.enum(['NONE', 'CHILD', 'PARENT']).optional(),
+      },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+    },
+    async (args) => {
+      try {
+        const flags = {
+          marketplace: args.marketplace,
+          productType: args.productType,
+          sellerId: args.sellerId,
+          grep: args.query,
+          attribute: args.attribute,
+          parentageLevel: args.parentageLevel,
+          requirementsEnforced: 'NOT_ENFORCED',
+        };
+        const inspected = await listingSchema.execute(buildToolContext(flags, factories));
+        return mcpResult({ account, schema: inspected });
+      } catch (error) {
+        return mcpErrorResult(error);
+      }
+    },
+  );
+
   for (const registration of registrations) {
     server.registerTool(
       registration.prepareName,
       {
-        title: registration.prepareTitle,
+        title: `【${account}】${registration.prepareTitle}`,
         description:
-          `${registration.description} 只预览并签发 15 分钟一次性令牌；` +
+          `固定店铺:${account}。${registration.description} 只预览并签发 15 分钟一次性令牌；` +
           '输入、账户、区域或远端当前状态变化后必须重新预览。',
         inputSchema: registration.inputShape,
         annotations: {
@@ -255,6 +317,7 @@ export function registerOperationalWriteTools(
           // 当前环境放行,避免运营走完一轮审批才发现令牌兑不了现。
           const permission = mcpApplyPermission(registration.operation);
           return mcpResult({
+            account,
             operation: registration.operation,
             preview,
             previewToken: issued.token,
@@ -275,9 +338,9 @@ export function registerOperationalWriteTools(
     server.registerTool(
       registration.applyName,
       {
-        title: registration.applyTitle,
+        title: `【${account}】${registration.applyTitle}`,
         description:
-          `${registration.description} 正式写入 Amazon；` +
+          `固定店铺:${account}。${registration.description} 正式写入 Amazon；` +
           '必须由 Cherry 对本次工具调用逐次弹出真人审批，不得自动批准。',
         inputSchema: { ...registration.inputShape, previewToken: previewTokenSchema },
         annotations: {
@@ -304,7 +367,7 @@ export function registerOperationalWriteTools(
           );
           applyConfirmedCapture(ctx, confirmed);
           const executed = await registration.tool.execute(ctx);
-          return mcpResult({ operation: registration.operation, executed });
+          return mcpResult({ account, operation: registration.operation, executed });
         } catch (error) {
           return mcpErrorResult(error);
         }

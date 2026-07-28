@@ -64,6 +64,7 @@ amz-cli <域> <命令> [参数]
 | 批量改库存等 🔒 | CLI:`feed submit ... --dry-run`；MCP:`prepare_feed_submit` → 审批 `apply_feed_submit`(不可撤销,门槛最高) |
 | 建 Campaign 外壳 🔒 | CLI:`ads campaign-create ... --dry-run`；MCP:`prepare_ads_campaign_create` → 审批 `apply_ads_campaign_create` |
 | 用选定关键词建立完整广告 🔒 | 生成方案 JSON 后 `ads keyword-campaign-launch --plan <文件> --dry-run`；若已配置安全 MCP，也可 `prepare_keyword_campaign` → Cherry 人工审批 → `launch_keyword_campaign` |
+| 向已有活动/广告组追加商品或正向关键词 🔒 | 先批量把 ASIN 解析为 SKU，再用 `ads campaign-extend --plan <文件> --dry-run`；MCP 用 `prepare_ads_campaign_extend` → Cherry 人工审批 → `apply_ads_campaign_extend` |
 | 暂停/启用广告 🔒 | CLI:`ads campaign-state ... --dry-run`；MCP:`prepare_ads_campaign_state` → 审批 `apply_ads_campaign_state` |
 | 调广告预算 🔒 | CLI:`ads campaign-budget ... --dry-run`；MCP:`prepare_ads_campaign_budget` → 审批 `apply_ads_campaign_budget` |
 | 调关键词竞价 🔒 | CLI:`ads keyword-bid ... --dry-run`；MCP:`prepare_ads_keyword_bid` → 审批 `apply_ads_keyword_bid` |
@@ -88,7 +89,7 @@ amz-cli <域> <命令> [参数]
 | “做个销售报告” | 追问是单品表现、全店汇总，还是导出全店明细文件 |
 | “导出 US 站全店商品明细” | `report run --type GET_MERCHANT_LISTINGS_ALL_DATA --marketplace US` |
 | “查这个 ASIN 的差评” | 说明 `feedback run` 只能查全店卖家反馈，不能按 ASIN 查商品评价，再确认是否继续 |
-| “用这些关键词建广告” | 先确认 profile/区域、ASIN 或 SKU、预算、日期、竞价策略、广告组默认竞价、每个词的匹配方式与竞价、创建后是否启用；生成固定方案并预览，不能直接创建 |
+| “用这些关键词建广告” | 默认理解为创建完整广告并开始投放，方案设置 `enableAfterCreate=true`；先确认店铺、站点、profile/区域、ASIN 或 SKU、预算、日期、竞价策略、广告组默认竞价和每个词的匹配方式与竞价。只有用户明确说暂不投放时才设为 `false`；只有 ASIN 时先用一次 `listing mine --asin "ASIN1,ASIN2,..."` 批量解析本店 SKU，全部唯一匹配后生成 SKU-only 固定方案并预览 |
 
 不要因为用户使用“报告”二字就自动创建 Reports API 报告。单品或全店销售汇总优先使用同步的 `sales stats`；只有用户明确需要导出、全量或明细文件时才用 `report run`。Reports API 的 ASIN 筛选不是通用参数，不能臆造。
 
@@ -118,11 +119,13 @@ amz-cli <域> <命令> [参数]
 
 **广告优化循环**:`ads report-run --type search-terms`(找高花费零转化的搜索词)→ 向用户建议否定/降竞价 → 用户同意后跑对应写命令的 `--dry-run` → 把带预览令牌的 confirm 命令交给用户执行。
 
-**完整关键词广告**:从 Amazon 报表、推荐结果或外部关键词工具收集候选词 → AI 去重和分析 → 与用户确认 ASIN/SKU、账户区域、日预算、竞价、匹配方式和最终是否启用 → 写入固定 JSON 方案 → `keyword-campaign-launch --dry-run` 或 MCP `prepare_keyword_campaign` → 人工核对 → PowerShell 确认或 Cherry 审批。正式流程始终先创建 PAUSED Campaign，只有广告组、商品广告和全部关键词逐项成功且回读一致后才启用。
+**完整关键词广告**:从 Amazon 报表、推荐结果或外部关键词工具收集候选词 → AI 去重和分析 → 一次批量把全部 ASIN 解析为当前店铺/站点的唯一 SKU → 与用户确认 SKU 映射、账户区域、日预算、竞价和匹配方式 → 正常“新建广告”设置 `enableAfterCreate=true`，只有用户明确要求暂不投放才设为 `false` → 写入包含 `marketplace` 且 `products[].sku` 必填的固定 JSON 方案 → `keyword-campaign-launch --dry-run` 或 MCP `prepare_keyword_campaign` → 人工核对一次预览和最终状态 → PowerShell 确认或 Cherry 审批一次。正式流程始终先创建 PAUSED Campaign，只有广告组、商品广告和全部关键词逐项成功且回读一致后才启用；任何失败都保持暂停。
+
+**扩展已有关键词广告**:用户要求把商品或正向关键词加入已有活动时，先批量解析并核实 SKU，再只读确认目标 Campaign 与广告组的 ID、名称、状态和归属关系，使用 `campaign-extend` 或 MCP `prepare_ads_campaign_extend`。预览必须区分已有项和待新增项；正式执行只补缺项，不创建 Campaign/广告组，不改预算、状态或已有竞价。活动已启用时必须说明新增项可能立即花钱。部分成功或结果不明时重新预览，只处理远端仍缺少的项目，不能重放整批方案。
 
 **改价决策**:`pricing foep`(Buy Box 预期价)→ `fees estimate --price <目标价>`(算完还赚不赚)→ 用户拍板 → `listing update --dry-run` → 带预览令牌的 confirm 命令交给用户。
 
-**改 listing 字段(标题/五点/亮点/图片等)**:先 `listing sku --include productTypes` 拿产品类型 → `listing schema --product-type <类型>` 或 `--attribute <字段>` 拿到该店铺、该市场、该产品类型的字段确切名字和结构(不要凭空拼 patch)→ 照 schema 拼 `--patches` → `listing update --dry-run`(走亚马逊官方 VALIDATION_PREVIEW,`status=VALID` 且无 ERROR issue 才算通过;ACCEPTED 是正式提交状态)→ 带预览令牌的 confirm 命令交给用户。商品亮点等新字段按市场和产品类型逐步开放,只有本次 schema 实际返回的字段才能用,不得把一个类型的字段名硬编码给其他类型。
+**改 listing 字段(标题/五点/亮点/图片等)**:先 `listing sku --include productTypes` 拿产品类型 → MCP 用只读 `inspect_listing_schema`，CLI 用 `listing schema --grep <业务名称>` 搜索真实字段，再用 `--attribute <字段>` 读取当前店铺、市场、产品类型的完整结构 → 照 schema 拼 `--patches` → `prepare_listing_update` / `listing update --dry-run` 会再次强制核对卖家专属 Schema，属性不存在或 `editable=false` 时在 VALIDATION_PREVIEW 前停止；通过后再走官方 VALIDATION_PREVIEW（`status=VALID` 且无 ERROR issue 才算通过；ACCEPTED 是正式提交状态）→ MCP 审批卡或带预览令牌的 CLI confirm。查不到或匹配多个属性时询问用户，不得猜字段名；尝试几个字段失败不能证明 API 不支持。
 
 Patch 规则：`add`/`replace`/`merge` 必须带对象数组 `value`；`merge` 只用于 `/attributes/fulfillment_availability` 或 `/attributes/purchasable_offer`。其他字段不得使用 `merge`；删除实例需要的选择器以当前 schema 和官方预览为准。
 
