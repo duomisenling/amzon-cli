@@ -9,6 +9,7 @@ import { printError } from './internal/errs/output.js';
 import { readPackageInfo } from './internal/package-info.js';
 import { isSandboxMode } from './internal/client/regions.js';
 import { extractAccountArg, loadAccount, loadDotEnvIfPresent } from './internal/account.js';
+import { setAuditAccount, flushAuditUploads } from './internal/audit.js';
 import { registerSetupCommands } from './setup/commands.js';
 import { registerTools } from './tools/registry.js';
 import { authWhoami } from './shortcuts/auth/whoami.js';
@@ -64,6 +65,7 @@ async function main(): Promise<void> {
   loadDotEnvIfPresent();
   const account = extractAccountArg(process.argv);
   if (account) loadAccount(account);
+  setAuditAccount(account); // 审计日志按店铺(账号)分目录;未指定 --account 记为 default
 
 
 
@@ -149,7 +151,12 @@ async function main(): Promise<void> {
     adsAuthExchange,
   ]);
 
-  await program.parseAsync(process.argv);
+  try {
+    await program.parseAsync(process.argv);
+  } finally {
+    // 命令结束(成功或失败)后,把本次运行的审计行一次性上报中央服务器(若配置)。
+    await flushAuditUploads();
+  }
 }
 
 main().catch((err: unknown) => {

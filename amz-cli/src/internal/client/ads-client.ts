@@ -16,6 +16,7 @@
 //   混用不同应用或把没有广告权限的 SP-API 凭证误当成广告凭证。
 
 import { AmzError } from '../errs/errors.js';
+import { auditLog } from '../audit.js';
 import { adsUserAgent } from '../user-agent.js';
 import { progress } from '../errs/output.js';
 import { exchangeLwaToken } from '../credential/lwa.js';
@@ -207,6 +208,7 @@ export class AdsClient {
       });
 
       if (resp.ok) {
+        auditLog({ api: 'ads', method, path, region: opts.region, status: resp.status, ok: true });
         if (resp.status === 204) return null;
         const text = await resp.text();
         if (text.trim() === '') return null;
@@ -248,6 +250,10 @@ export class AdsClient {
         continue;
       }
 
+      auditLog({
+        api: 'ads', method, path, region: opts.region, status: resp.status, ok: false,
+        errorSubtype: `ads.http_${resp.status}`,
+      });
       if (resp.status === 401 || resp.status === 403) {
         throw new AmzError({
           type: 'insufficient_scope',

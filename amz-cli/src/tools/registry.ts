@@ -22,6 +22,7 @@ import {
   verifyPreviewToken,
 } from '../internal/confirmation/preview-token.js';
 import type { ToolContext, ToolDefinition } from './types.js';
+import { setAuditOperation } from '../internal/audit.js';
 import { buildToolContext } from './context.js';
 import { applyConfirmedCapture, captureConfirmation, sameConfirmationSnapshot } from './confirmation.js';
 
@@ -84,6 +85,7 @@ export function registerTools(program: Command, tools: ToolDefinition[]): void {
 }
 
 async function runTool(tool: ToolDefinition, flags: Record<string, unknown>): Promise<void> {
+  setAuditOperation(`${tool.service} ${tool.command}`); // 审计日志标注当前操作
   validateFlags(tool, flags); // 框架级:enum 校验+规范化(先于业务 validate)
   if (tool.validate) tool.validate(flags);
 

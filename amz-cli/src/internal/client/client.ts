@@ -9,6 +9,7 @@
 
 import Bottleneck from 'bottleneck';
 import { AmzError } from '../errs/errors.js';
+import { auditLog } from '../audit.js';
 import { spApiUserAgent } from '../user-agent.js';
 import { progress } from '../errs/output.js';
 import type { CredentialProvider } from '../credential/provider.js';
@@ -45,10 +46,20 @@ export class SpApiClient {
     const replaySafe =
       method.toUpperCase() === 'GET' || method.toUpperCase() === 'HEAD' || opts.retry5xx === true;
     for (let attempt = 0; ; attempt++) {
-      const resp = await limiter.schedule(() => this.doFetch(method, path, opts, replaySafe));
+      let resp: Response;
+      try {
+        resp = await limiter.schedule(() => this.doFetch(method, path, opts, replaySafe));
+      } catch (err) {
+        auditLog({
+          api: 'sp', method, path, region: opts.region, ok: false,
+          errorSubtype: err instanceof AmzError ? err.subtype : 'network_error',
+        });
+        throw err;
+      }
 
       // 成功
       if (resp.ok) {
+        auditLog({ api: 'sp', method, path, region: opts.region, status: resp.status, ok: true });
         if (resp.status === 204) return null;
         const text = await resp.text();
         if (text.trim() === '') return null;
@@ -98,7 +109,12 @@ export class SpApiClient {
         continue;
       }
 
-      throw this.classifyError(resp.status, bodyText, path, method, retryable5xx);
+      const classified = this.classifyError(resp.status, bodyText, path, method, retryable5xx);
+      auditLog({
+        api: 'sp', method, path, region: opts.region, status: resp.status, ok: false,
+        errorSubtype: classified.subtype,
+      });
+      throw classified;
     }
   }
 

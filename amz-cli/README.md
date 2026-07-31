@@ -130,4 +130,5 @@ src/
 
 - 凭证只放项目 `.env`、用户目录 `~/.amz-cli/.env` 或 Token Broker，绝不写进代码；这些真实凭证文件都不得提交
 - access_token 只存进程内存,不落盘
+- **审计日志(按店铺分目录)**:每次 SP-API / Ads API 请求自动记一行到 `~/.amz-cli/audit/<账号>/<YYYY-MM>.log`(一行一个 JSON:时间、账号、操作、接口路径、区域、HTTP 状态——**只记"访问了什么",不记 PII 具体值**)。默认开启;用 `AMZ_AUDIT_DIR` 改存储路径,`AMZ_AUDIT_DISABLE=1` 关闭。写日志失败不影响业务请求。多店铺用 `--account <店铺>` 区分,日志自动按店铺分开;未指定则记为 `default`
 - 长期多人部署优先走 Broker；本地 refresh token 只用于经过授权的可信电脑和小范围试用
