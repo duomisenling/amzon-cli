@@ -1,0 +1,11 @@
+{
+  "name": "amz-audit-server",
+  "version": "0.1.0",
+  "private": true,
+  "description": "amz-cli 审计日志中央接收端 + 网页看板(纯 Node,无依赖)",
+  "type": "module",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "start": "node server.mjs"
+  }
+}
