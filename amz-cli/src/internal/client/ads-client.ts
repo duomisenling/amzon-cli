@@ -16,6 +16,7 @@
 //   混用不同应用或把没有广告权限的 SP-API 凭证误当成广告凭证。
 
 import { AmzError } from '../errs/errors.js';
+import { adsUserAgent } from '../user-agent.js';
 import { progress } from '../errs/output.js';
 import { exchangeLwaToken } from '../credential/lwa.js';
 import { brokerConfigFromEnv, mintFromBroker } from '../credential/broker.js';
@@ -164,6 +165,8 @@ export class AdsClient {
       const headers: Record<string, string> = {
         'Amazon-Advertising-API-ClientId': auth.clientId,
         Authorization: `Bearer ${auth.token}`,
+        // 按主体可配的 User-Agent(见 user-agent.ts)
+        'User-Agent': adsUserAgent(),
         ...(opts.extraHeaders ?? {}),
       };
       if (opts.profileId) headers['Amazon-Advertising-API-Scope'] = opts.profileId;

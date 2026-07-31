@@ -172,7 +172,7 @@ const SELLER_ID_FLAG = {
   desc: '卖家编号(本地模式可省略并读 SELLER_ID;Broker 模式仅用于与服务端返回值核对,不能兜底)',
 };
 
-const LISTINGS_INCLUDED_DATA = [
+export const LISTINGS_INCLUDED_DATA = [
   'summaries',
   'attributes',
   'issues',
@@ -183,7 +183,7 @@ const LISTINGS_INCLUDED_DATA = [
   'productTypes',
 ];
 
-function validateListingsIncludedData(flags: Record<string, unknown>): void {
+export function validateListingsIncludedData(flags: Record<string, unknown>): void {
   const include = strFlag(flags, 'include');
   if (!include) return;
   for (const set of include.split(',').map((s) => s.trim())) {

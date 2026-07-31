@@ -9,6 +9,7 @@
 
 import Bottleneck from 'bottleneck';
 import { AmzError } from '../errs/errors.js';
+import { spApiUserAgent } from '../user-agent.js';
 import { progress } from '../errs/output.js';
 import type { CredentialProvider } from '../credential/provider.js';
 import type { Region } from './regions.js';
@@ -114,7 +115,11 @@ export class SpApiClient {
         if (v !== undefined) url.searchParams.set(k, String(v));
       }
     }
-    const headers: Record<string, string> = { 'x-amz-access-token': creds.accessToken };
+    const headers: Record<string, string> = {
+      'x-amz-access-token': creds.accessToken,
+      // 按主体可配的 User-Agent,避免多主体共用同一应用层指纹(见 user-agent.ts)
+      'User-Agent': spApiUserAgent(),
+    };
     let body: string | undefined;
     if (opts.body !== undefined) {
       headers['Content-Type'] = 'application/json';

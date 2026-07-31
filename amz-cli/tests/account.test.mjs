@@ -39,6 +39,8 @@ test('multi-store account env example is self-contained and has no Broker settin
     'SELLER_ID_FE',
     'SP_API_REGION',
     'SP_API_SANDBOX',
+    'SP_API_USER_AGENT',
+    'ADS_USER_AGENT',
     'ADS_CLIENT_ID',
     'ADS_CLIENT_SECRET',
     'ADS_REFRESH_TOKEN',

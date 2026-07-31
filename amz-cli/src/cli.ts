@@ -15,6 +15,7 @@ import { authWhoami } from './shortcuts/auth/whoami.js';
 import { listingSearch } from './shortcuts/listing/catalog-search.js';
 import { listingGet } from './shortcuts/listing/catalog-get.js';
 import { listingMine, listingSku } from './shortcuts/listing/mine.js';
+import { listingBatch } from './shortcuts/listing/batch.js';
 import { listingSchema } from './shortcuts/listing/schema.js';
 import { ordersList } from './shortcuts/orders/list.js';
 import { ordersGet } from './shortcuts/orders/get.js';
@@ -34,6 +35,7 @@ import { feedSubmit, feedStatus, feedResult } from './shortcuts/feed/commands.js
 import { adsProfiles, adsCampaigns } from './shortcuts/ads/commands.js';
 import { adsReportRun, adsReportStatus } from './shortcuts/ads/report.js';
 import { adsWastedSpend } from './shortcuts/ads/wasted-spend.js';
+import { adsProductAds, adsCoverage } from './shortcuts/ads/product-ads.js';
 import { adsCampaignCreate } from './shortcuts/ads/campaign-create.js';
 import { adsCampaignExtend } from './shortcuts/ads/campaign-extend.js';
 import { adsKeywordCampaignLaunch } from './shortcuts/ads/keyword-campaign-launch.js';
@@ -53,6 +55,8 @@ import { returnsBySku } from './shortcuts/returns/by-sku.js';
 import { reimbursementsList } from './shortcuts/reimbursements/list.js';
 import { feesEstimate } from './shortcuts/fees/estimate.js';
 import { shipmentsList, shipmentsItems } from './shortcuts/shipments/list.js';
+import { aplusDocuments, aplusAsins, aplusCoverage } from './shortcuts/aplus/content.js';
+import { catalogBatch } from './shortcuts/catalog/batch.js';
 
 async function main(): Promise<void> {
   const packageInfo = readPackageInfo();
@@ -60,6 +64,8 @@ async function main(): Promise<void> {
   loadDotEnvIfPresent();
   const account = extractAccountArg(process.argv);
   if (account) loadAccount(account);
+
+
 
   // 沙盒模式显著提示,避免把 mock 数据误当真实数据
   if (isSandboxMode()) {
@@ -86,6 +92,7 @@ async function main(): Promise<void> {
     listingGet,
     listingMine,
     listingSku,
+    listingBatch,
     listingSchema,
     ordersList,
     ordersGet,
@@ -102,6 +109,10 @@ async function main(): Promise<void> {
     feesEstimate,
     shipmentsList,
     shipmentsItems,
+    aplusDocuments,
+    aplusAsins,
+    aplusCoverage,
+    catalogBatch,
     reportTypes,
     reportCreate,
     reportStatus,
@@ -121,6 +132,8 @@ async function main(): Promise<void> {
     adsReportRun,
     adsReportStatus,
     adsWastedSpend,
+    adsProductAds,
+    adsCoverage,
     // —— 广告写操作(dry-run/confirm 门槛;首次验证走测试账户=广告沙盒)——
     adsCampaignCreate,
     adsCampaignExtend,

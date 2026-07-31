@@ -11,6 +11,11 @@
 /.npmrc
 /local-delivery/
 
+# 出口代理:setup.sh 在服务器上生成的配置含代理密码,绝不提交
+# (真实的主体↔域名↔出口IP↔密码对照表放 local-delivery/egress-proxy/,上面已整体忽略)
+/deploy/egress-proxy/generated/
+*.credentials
+
 # 本机生成的 MCP 配置与安装包
 /amz-cli-mcp*.json
 *.tgz

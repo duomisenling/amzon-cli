@@ -99,6 +99,26 @@ src/
 - 网络请求都有截止时间：Broker/LWA 30 秒、普通 SP-API/Ads API 60 秒、文件上传下载 120 秒，防止进程永久卡住。
 - CLI 门禁用于防止误操作和普通非交互自动化，不是对同一电脑上恶意程序的强安全边界。若 Agent 能读取具写权限的 Amazon access token 或控制伪终端，必须依靠独立只读凭证或外部人工审批服务隔离。
 
+## 盘点命令(Listing 与广告完备性)
+
+一组只读命令,把数据可靠取出并吐成结构化 JSON(`{ok:true,data}` 信封);差集/打分/阈值判定由下游脚本完成,CLI 不做业务判定。大结果集用 `--out <文件>`。
+
+- **全量在售清单(盘点分母)** — 复用现有 `report run`:
+  `amz-cli report run --type GET_MERCHANT_LISTINGS_ALL_DATA --marketplace UK --out listings_uk.json`
+  一条龙创建→轮询→下载→解压→解析 TSV(已处理 gzip、欧洲站 cp1252 编码、FATAL/CANCELLED)。
+
+- **A+ 覆盖** — `amz-cli aplus coverage --marketplace DE`
+  输出有已发布 A+ 的 ASIN,每条 `{asin, contentReferenceKey, status}`。默认只收 `APPROVED`(官方 `ContentStatus` 无 "PUBLISHED",用 `--status` 可放宽)。不含 Premium A+。底层:`aplus documents` / `aplus asins --content-key <key>`。
+
+- **图片/变体粗筛** — `amz-cli catalog batch --asin-file asins.txt --marketplace DE --include images,relationships`
+  自动按 20 个/片分片;查不到的 ASIN 输出 `{asin, found:false}`(与"不合格"区分)。
+
+- **自己 listing 的 attributes(最准)** — `amz-cli listing batch --sku-file skus.txt --marketplace UK --out attrs.jsonl --concurrency 4`
+  逐 SKU 拉取,结果**增量写入 jsonl**;中途中断重跑会**从断点续跑**(跳过 --out 里已完成的 SKU);单个 SKU 失败不中断整批,失败写 `<out>.failures.jsonl` 并在 stderr 汇总。
+
+- **广告投放盘点** — `amz-cli ads coverage --profile-id 1234567890`
+  输出正在投放的标的 `{asin, sku, adGroupId, campaignId, state}`,默认排除 `ARCHIVED`(`--state` 可调)。底层:`ads product-ads`(原样透传)、`ads profiles`(建立"主体×站点→profileId"映射)。广告用独立 `ADS_*` 凭证,按 `profileId` 定位,与 SP-API 无关。
+
 ## 数据边界(避免误解)
 
 - **公开数据,任意商品可查**:商品目录(标题/图片/品牌/BSR 排名)、Buy Box 与报价概况——等同于商品页上任何人可见的信息,竞品也能查
