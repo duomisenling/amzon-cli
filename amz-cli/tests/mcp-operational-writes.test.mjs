@@ -70,12 +70,17 @@ test('operational write tools are explicit prepare/apply pairs with destructive 
     assert.equal(inspectSchema.annotations.destructiveHint, false);
     for (const base of [
       'listing_update',
+      'listing_create',
       'feed_submit',
       'ads_campaign_create',
       'ads_campaign_state',
       'ads_campaign_budget',
       'ads_keyword_bid',
+      'ads_bid_batch',
+      'ads_budget_batch',
+      'ads_state_batch',
       'ads_negative_keyword',
+      'ads_negative_batch',
     ]) {
       const prepare = listed.tools.find((tool) => tool.name === `prepare_${base}`);
       const apply = listed.tools.find((tool) => tool.name === `apply_${base}`);

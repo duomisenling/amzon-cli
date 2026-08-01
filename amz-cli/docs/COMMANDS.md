@@ -545,6 +545,39 @@ amz-cli ads test-account-status
 
 ---
 
+## 运营高频命令(数据总览 + 批量改)
+
+一组"把多次调用收成一条命令"的运营命令:读命令一步取数聚合,批量写命令**一次预览整批 → 人审一次 → 令牌绑定整批 → 按片执行、失败隔离**(单批最多 100 条,超出自动分批/请拆批)。批量写清单:CLI 用 `--file <清单.json>`,MCP 用内联 `--changes`,Agent 可直接拿读命令输出生成。
+
+### 读:数据总览
+
+- **`ads performance` — 广告绩效总览(标最差)**
+  `amz-cli ads performance --profile-id 123 --start 2026-07-01 --end 2026-07-31 [--by ad-group] [--min-spend 5] [--acos-min 50] [--limit 20]`
+  按 campaign(或广告组)汇总花费/销量/ACOS/CTR/CVR/CPC,**"有花费零单"标 `spendNoSales` 且排最前**,其余按 ACOS 降序。带 `campaignId`,直接喂 `ads bid-batch`/`budget-batch`/`state-batch`。
+
+- **`listing issues` — 揪出被压制/搜不到的 listing**
+  `amz-cli listing issues --marketplace US [--severity ERROR|WARNING] [--full-scan] [--out issues.json]`
+  自动翻页拉全本店 listing,只留有问题的,压成 `{sku,asin,itemName,status,issues}`,汇总 `suppressed(不可购买)/searchHidden(搜不到)/withErrors`。默认服务端只取带 ERROR 问题的(省调用);`--full-scan` 全量(能抓"状态被压制但暂无 issue")。大店铺用 `--out`。
+
+- **`pricing buybox` — 批量看自己有没有拿 Buy Box**
+  `amz-cli pricing buybox --marketplace US --asins B0…,B0… [--asin-file skus.txt] [--lost-only] [--out bb.json]`
+  按 ASIN 查 featured offer 并比对自己的 sellerId,标 `won / lost / no-featured-offer`,带 Buy Box 价格。一次最多 20/批,超过自动分批;`--lost-only` 只回丢失的。
+
+### 写 🔒:批量改(dry-run → confirm)
+
+- **`ads bid-batch` — 批量改关键词竞价**:`--file [{"keywordId":"…","bid":0.85}, …]`
+- **`ads budget-batch` — 批量改活动日预算**:`--file [{"campaignId":"…","dailyBudget":20}, …]`
+- **`ads state-batch` — 批量启用/暂停活动**:`--file [{"campaignId":"…","state":"PAUSED"}, …]`(仅 ENABLED/PAUSED)
+- **`ads negative-batch` — 批量加否定词**(吃 `ads wasted-spend` 输出):`--file [{"campaignId":"…","adGroupId":"…","text":"…","match":"NEGATIVE_EXACT"}, …]`
+- **`listing create` 🔒 — 引导式新建 listing**:`--marketplace US --sku NEW-SKU --product-type … --attributes @attrs.json`
+  `--dry-run` 走官方 `VALIDATION_PREVIEW`,会**列出缺的必填属性**且不落库;属性名先用 `listing schema` / `inspect_listing_schema` 查准,别猜。SKU 已存在会警示(create 会覆盖)。
+
+> 预览会列出每条"当前→新"值并标 `no-change`(已是目标值)/`not-found`(远端没有),这两类自动跳过;整批无有效改动时不签发令牌。MCP 侧每条批量命令都有 `prepare_*` / `apply_*` 对,`apply` 仍受 `AMZ_MCP_ALLOW_WRITES=true` + 白名单约束、逐次真人审批。
+>
+> 多店铺:`--account` 大小写不敏感(`cycayit` 自动匹配 `Cycayit`)。
+
+---
+
 ## 写操作怎么执行(必读)
 
 > ⚠️ **写操作只能用编译版执行**：正式使用 `amz-cli ...`；源码开发者先 `npm run build`，再用 `node dist/cli.js ...`。

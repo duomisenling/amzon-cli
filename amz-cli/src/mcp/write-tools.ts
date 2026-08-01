@@ -10,9 +10,14 @@ import { adsCampaignCreate } from '../shortcuts/ads/campaign-create.js';
 import { adsCampaignExtend, campaignExtensionPlanSchema } from '../shortcuts/ads/campaign-extend.js';
 import { adsCampaignState } from '../shortcuts/ads/campaign-state.js';
 import { adsKeywordBid, adsNegativeKeyword } from '../shortcuts/ads/keywords.js';
+import { adsBidBatch, MAX_BID_BATCH } from '../shortcuts/ads/bid-batch.js';
+import { adsNegativeBatch, MAX_NEGATIVE_BATCH } from '../shortcuts/ads/negative-batch.js';
+import { adsStateBatch, MAX_STATE_BATCH } from '../shortcuts/ads/state-batch.js';
+import { adsBudgetBatch, MAX_BUDGET_BATCH } from '../shortcuts/ads/budget-batch.js';
 import { feedSubmit } from '../shortcuts/feed/commands.js';
 import { listingSchema } from '../shortcuts/listing/schema.js';
 import { listingUpdate } from '../shortcuts/listing/update.js';
+import { listingCreate } from '../shortcuts/listing/create.js';
 import {
   applyConfirmedCapture,
   captureConfirmation,
@@ -88,6 +93,34 @@ const registrations: WriteRegistration[] = [
       sellerId: args['sellerId'],
       productType: args['productType'],
       patches: JSON.stringify(args['patches']),
+    }),
+    prepareOpenWorld: true,
+  },
+  {
+    operation: 'listing.create',
+    prepareName: 'prepare_listing_create',
+    applyName: 'apply_listing_create',
+    prepareTitle: '预览新建 Listing',
+    applyTitle: '新建 Listing',
+    description:
+      '引导式新建单个 Listing。属性名先用 inspect_listing_schema 查准;预览走官方 VALIDATION_PREVIEW,' +
+      '会列出缺的必填属性且不落库;SKU 已存在会警示(create 会覆盖)。',
+    tool: listingCreate,
+    inputShape: {
+      marketplace: nonEmpty,
+      sku: nonEmpty,
+      sellerId: nonEmpty.optional(),
+      productType: nonEmpty,
+      attributes: z.record(z.unknown()).refine((a) => Object.keys(a).length > 0, '至少一个属性'),
+      requirements: z.enum(['LISTING', 'LISTING_OFFER_ONLY', 'LISTING_PRODUCT_ONLY']).optional(),
+    },
+    toFlags: (args) => ({
+      marketplace: args['marketplace'],
+      sku: args['sku'],
+      sellerId: args['sellerId'],
+      productType: args['productType'],
+      attributes: JSON.stringify(args['attributes']),
+      requirements: args['requirements'],
     }),
     prepareOpenWorld: true,
   },
@@ -189,6 +222,31 @@ const registrations: WriteRegistration[] = [
     prepareOpenWorld: true,
   },
   {
+    operation: 'ads.bid-batch',
+    prepareName: 'prepare_ads_bid_batch',
+    applyName: 'apply_ads_bid_batch',
+    prepareTitle: '预览批量关键词竞价修改',
+    applyTitle: '批量修改关键词竞价',
+    description:
+      '按 [{keywordId,bid}] 清单批量调整关键词竞价;预览列出整批当前→新竞价并核对全部当前值,' +
+      '执行按片写入、失败隔离。整批绑定一个一次性令牌,只需一次真人审批。',
+    tool: adsBidBatch,
+    inputShape: {
+      profileId: numericId,
+      region,
+      changes: z
+        .array(z.object({ keywordId: numericId, bid: z.number().positive().max(10_000) }).strict())
+        .min(1)
+        .max(MAX_BID_BATCH),
+    },
+    toFlags: (args) => ({
+      profileId: String(args['profileId']),
+      region: args['region'],
+      changes: JSON.stringify(args['changes']),
+    }),
+    prepareOpenWorld: true,
+  },
+  {
     operation: 'ads.negative-keyword',
     prepareName: 'prepare_ads_negative_keyword',
     applyName: 'apply_ads_negative_keyword',
@@ -205,6 +263,90 @@ const registrations: WriteRegistration[] = [
       match: z.enum(['NEGATIVE_EXACT', 'NEGATIVE_PHRASE']).optional(),
     },
     toFlags: strings,
+    prepareOpenWorld: false,
+  },
+  {
+    operation: 'ads.budget-batch',
+    prepareName: 'prepare_ads_budget_batch',
+    applyName: 'apply_ads_budget_batch',
+    prepareTitle: '预览批量广告日预算修改',
+    applyTitle: '批量修改广告日预算',
+    description:
+      '按 [{campaignId,dailyBudget}] 清单批量改日预算;预览列出整批当前→新预算并核对全部当前值,' +
+      '执行按片写入、失败隔离。整批绑定一个一次性令牌,只需一次真人审批。',
+    tool: adsBudgetBatch,
+    inputShape: {
+      profileId: numericId,
+      region,
+      changes: z
+        .array(z.object({ campaignId: numericId, dailyBudget: z.number().positive().max(1_000_000) }).strict())
+        .min(1)
+        .max(MAX_BUDGET_BATCH),
+    },
+    toFlags: (args) => ({
+      profileId: String(args['profileId']),
+      region: args['region'],
+      changes: JSON.stringify(args['changes']),
+    }),
+    prepareOpenWorld: true,
+  },
+  {
+    operation: 'ads.state-batch',
+    prepareName: 'prepare_ads_state_batch',
+    applyName: 'apply_ads_state_batch',
+    prepareTitle: '预览批量启用/暂停广告活动',
+    applyTitle: '批量启用/暂停广告活动',
+    description:
+      '按 [{campaignId,state}] 清单批量启用/暂停广告活动;预览列出整批当前→目标状态并核对全部当前值,' +
+      '执行按片写入、失败隔离。整批绑定一个一次性令牌,只需一次真人审批。启用会立即开始花钱。',
+    tool: adsStateBatch,
+    inputShape: {
+      profileId: numericId,
+      region,
+      changes: z
+        .array(z.object({ campaignId: numericId, state: z.enum(['ENABLED', 'PAUSED']) }).strict())
+        .min(1)
+        .max(MAX_STATE_BATCH),
+    },
+    toFlags: (args) => ({
+      profileId: String(args['profileId']),
+      region: args['region'],
+      changes: JSON.stringify(args['changes']),
+    }),
+    prepareOpenWorld: true,
+  },
+  {
+    operation: 'ads.negative-batch',
+    prepareName: 'prepare_ads_negative_batch',
+    applyName: 'apply_ads_negative_batch',
+    prepareTitle: '预览批量添加否定关键词',
+    applyTitle: '批量添加否定关键词',
+    description:
+      '按 [{campaignId,adGroupId,text,match?}] 清单批量创建否定关键词;预览列出整批待创建否定词,' +
+      '执行按片创建、失败隔离。整批绑定一个一次性令牌,只需一次真人审批。否定词可逆。',
+    tool: adsNegativeBatch,
+    inputShape: {
+      profileId: numericId,
+      region,
+      changes: z
+        .array(
+          z
+            .object({
+              campaignId: numericId,
+              adGroupId: numericId,
+              text: nonEmpty.max(80),
+              match: z.enum(['NEGATIVE_EXACT', 'NEGATIVE_PHRASE']).optional(),
+            })
+            .strict(),
+        )
+        .min(1)
+        .max(MAX_NEGATIVE_BATCH),
+    },
+    toFlags: (args) => ({
+      profileId: String(args['profileId']),
+      region: args['region'],
+      changes: JSON.stringify(args['changes']),
+    }),
     prepareOpenWorld: false,
   },
 ];

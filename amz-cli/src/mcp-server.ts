@@ -223,12 +223,13 @@ async function main(): Promise<void> {
       connector: createStdioAccountConnector({ serverPath }),
     });
   } else {
-    if (account) loadAccount(account);
+    // 账号名大小写不敏感,归一到规范名(本地=文件实际大小写)。
+    const effectiveAccount = account ? loadAccount(account) : undefined;
     // MCP 写操作的审计也按店铺记账:多店路由为每个账号起 `--account` 子进程,
     // 每个子进程都走到这里,于是各自把审计归到自己的店铺(未指定则 default),
     // 不再统一记成 default(与 cli.ts 的处理一致)。
-    setAuditAccount(account);
-    server = createAmazonMcpServer({}, account ?? 'default');
+    setAuditAccount(effectiveAccount);
+    server = createAmazonMcpServer({}, effectiveAccount ?? 'default');
   }
   await server.connect(new StdioServerTransport());
 }

@@ -106,7 +106,7 @@ test('combined MCP exposes one tool set whose every tool requires an allowed acc
   }
 });
 
-test('combined MCP rejects missing, unknown, and non-canonical account names', async () => {
+test('combined MCP rejects missing/unknown accounts, but routes case-insensitively', async () => {
   const { client, router } = await connected(['shop-b', 'shop-d']);
   try {
     await assert.rejects(
@@ -120,13 +120,12 @@ test('combined MCP rejects missing, unknown, and non-canonical account names', a
       }),
       /account/,
     );
-    await assert.rejects(
-      client.callTool({
-        name: 'prepare_keyword_campaign',
-        arguments: { account: 'SHOP-B', plan: plan('case-mismatch') },
-      }),
-      /account/,
-    );
+    // 大小写不敏感:大写 SHOP-B 归一到配置里的 shop-b 并正常路由,不再被拒。
+    const prepared = await client.callTool({
+      name: 'prepare_keyword_campaign',
+      arguments: { account: 'SHOP-B', plan: plan('case-insensitive') },
+    });
+    assert.equal(prepared.structuredContent.account, 'shop-b');
   } finally {
     await client.close();
     await router.close();

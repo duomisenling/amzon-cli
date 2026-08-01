@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { AmzError } from './errs/errors.js';
@@ -93,13 +93,39 @@ function isAmzCliConfigKey(key: string): boolean {
 }
 
 /**
+ * 在 accounts 目录里大小写不敏感地找账号文件,返回规范名(文件实际大小写)和路径。
+ * 先精确命中(最快、也照顾大小写敏感的文件系统),再回退到大小写不敏感扫描。
+ */
+function resolveAccountFile(dir: string, account: string): { file: string; canonical: string } | undefined {
+  // 直接读目录拿真实文件名大小写:Windows 文件系统不分大小写,existsSync 对
+  // 任意大小写都返回 true,拿不到规范名。先精确命中,再回退大小写不敏感。
+  const wanted = `${account}.env`;
+  const target = wanted.toLowerCase();
+  let names: string[];
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return undefined; // accounts 目录不存在等,按未命中处理
+  }
+  const exact = names.find((n) => n === wanted);
+  if (exact) return { file: join(dir, exact), canonical: account };
+  const ci = names.find((n) => n.toLowerCase() === target);
+  if (ci) return { file: join(dir, ci), canonical: ci.slice(0, -'.env'.length) };
+  return undefined;
+}
+
+/**
  * 加载显式选择的账号。调用前应先加载默认 .env，以便识别 Broker 模式；
  * 本地账号文件随后完整覆盖并隔离店铺凭证。
+ *
+ * 账号名大小写不敏感:用户可传 `cycayit`,自动匹配到 `Cycayit.env`。
+ * 返回归一后的规范账号名(本地=文件实际大小写;Broker=原样),
+ * 供调用方统一用于审计归属与店铺路由,避免同店分成两个名字。
  */
 export function loadAccount(
   account: string,
   opts: { env?: Env; home?: string; stderr?: (text: string) => void } = {},
-): void {
+): string {
   const env = opts.env ?? process.env;
   const home = opts.home ?? homedir();
   const writeStderr = opts.stderr ?? ((text: string) => process.stderr.write(text));
@@ -115,16 +141,17 @@ export function loadAccount(
     });
   }
 
-  const file = join(home, '.amz-cli', 'accounts', `${account}.env`);
-  if (existsSync(file)) {
+  const dir = join(home, '.amz-cli', 'accounts');
+  const resolved = resolveAccountFile(dir, account);
+  if (resolved) {
     clearKeys(env, [...ACCOUNT_CREDENTIAL_KEYS, ...BROKER_KEYS]);
-    const vars = parseEnvText(readFileSync(file, 'utf8'));
+    const vars = parseEnvText(readFileSync(resolved.file, 'utf8'));
     for (const [key, value] of Object.entries(vars)) env[key] = value;
     if (env['BROKER_URL']?.trim() && !env['STORE']?.trim()) {
-      env['STORE'] = brokerStoreName(account);
+      env['STORE'] = brokerStoreName(resolved.canonical);
     }
-    writeStderr(`👤 [账号] ${account}(凭证来自 ${file})\n`);
-    return;
+    writeStderr(`👤 [账号] ${resolved.canonical}(凭证来自 ${resolved.file})\n`);
+    return resolved.canonical;
   }
 
   // Broker 的共享 URL/团队令牌来自默认 .env；切店时清除所有本地店铺身份，
@@ -133,7 +160,7 @@ export function loadAccount(
     clearKeys(env, ACCOUNT_CREDENTIAL_KEYS);
     env['STORE'] = brokerStoreName(account);
     writeStderr(`👤 [账号] ${account}(Broker 店铺 ${env['STORE']})\n`);
-    return;
+    return account;
   }
 
   throw new AmzError({
@@ -142,9 +169,9 @@ export function loadAccount(
     param: '--account',
     hintAgent: 'report_to_human',
     hintHuman:
-      `账号 "${account}" 不存在:没有找到凭证文件 ${file},也没有配置 Broker。` +
+      `账号 "${account}" 不存在:没有找到凭证文件 ${join(dir, `${account}.env`)}(大小写不敏感),也没有配置 Broker。` +
       `请创建该文件(内容参考 .env.example)或联系管理员在 Broker 端开通。`,
-    message: `account file not found: ${file} (and BROKER_URL not set)`,
+    message: `account file not found for: ${account} (and BROKER_URL not set)`,
   });
 }
 

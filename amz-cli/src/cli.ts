@@ -17,6 +17,7 @@ import { listingSearch } from './shortcuts/listing/catalog-search.js';
 import { listingGet } from './shortcuts/listing/catalog-get.js';
 import { listingMine, listingSku } from './shortcuts/listing/mine.js';
 import { listingBatch } from './shortcuts/listing/batch.js';
+import { listingIssues } from './shortcuts/listing/issues.js';
 import { listingSchema } from './shortcuts/listing/schema.js';
 import { ordersList } from './shortcuts/orders/list.js';
 import { ordersGet } from './shortcuts/orders/get.js';
@@ -30,12 +31,15 @@ import {
 } from './shortcuts/report/commands.js';
 import { feedbackRun } from './shortcuts/feedback/monitor.js';
 import { pricingCompetitive } from './shortcuts/pricing/competitive.js';
+import { pricingBuybox } from './shortcuts/pricing/buybox.js';
 import { pricingFoep } from './shortcuts/pricing/foep.js';
 import { listingUpdate } from './shortcuts/listing/update.js';
+import { listingCreate } from './shortcuts/listing/create.js';
 import { feedSubmit, feedStatus, feedResult } from './shortcuts/feed/commands.js';
 import { adsProfiles, adsCampaigns } from './shortcuts/ads/commands.js';
 import { adsReportRun, adsReportStatus } from './shortcuts/ads/report.js';
 import { adsWastedSpend } from './shortcuts/ads/wasted-spend.js';
+import { adsPerformance } from './shortcuts/ads/performance.js';
 import { adsProductAds, adsCoverage } from './shortcuts/ads/product-ads.js';
 import { adsCampaignCreate } from './shortcuts/ads/campaign-create.js';
 import { adsCampaignExtend } from './shortcuts/ads/campaign-extend.js';
@@ -43,6 +47,10 @@ import { adsKeywordCampaignLaunch } from './shortcuts/ads/keyword-campaign-launc
 import { adsCampaignState } from './shortcuts/ads/campaign-state.js';
 import { adsCampaignBudget } from './shortcuts/ads/campaign-budget.js';
 import { adsKeywords, adsKeywordBid, adsNegativeKeyword } from './shortcuts/ads/keywords.js';
+import { adsBidBatch } from './shortcuts/ads/bid-batch.js';
+import { adsNegativeBatch } from './shortcuts/ads/negative-batch.js';
+import { adsStateBatch } from './shortcuts/ads/state-batch.js';
+import { adsBudgetBatch } from './shortcuts/ads/budget-batch.js';
 import { adsTestAccountCreate, adsTestAccountStatus } from './shortcuts/ads/test-account.js';
 import { adsAuthUrl, adsAuthExchange } from './shortcuts/ads/auth.js';
 import { salesStats } from './shortcuts/sales/stats.js';
@@ -64,8 +72,9 @@ async function main(): Promise<void> {
   // 先加载共享 .env 以识别 Broker，再让显式账号完整覆盖/隔离店铺凭证。
   loadDotEnvIfPresent();
   const account = extractAccountArg(process.argv);
-  if (account) loadAccount(account);
-  setAuditAccount(account); // 审计日志按店铺(账号)分目录;未指定 --account 记为 default
+  // 账号名大小写不敏感;用归一后的规范名记审计,避免同店按大小写分成两个目录。
+  const effectiveAccount = account ? loadAccount(account) : undefined;
+  setAuditAccount(effectiveAccount); // 审计日志按店铺(账号)分目录;未指定 --account 记为 default
 
 
 
@@ -95,6 +104,7 @@ async function main(): Promise<void> {
     listingMine,
     listingSku,
     listingBatch,
+    listingIssues,
     listingSchema,
     ordersList,
     ordersGet,
@@ -122,9 +132,11 @@ async function main(): Promise<void> {
     reportRun,
     feedbackRun,
     pricingCompetitive,
+    pricingBuybox,
     pricingFoep,
     // —— 写操作(第二阶段;dry-run/confirm 门槛由框架强制)——
     listingUpdate,
+    listingCreate,
     feedSubmit,
     feedStatus,
     feedResult,
@@ -134,6 +146,7 @@ async function main(): Promise<void> {
     adsReportRun,
     adsReportStatus,
     adsWastedSpend,
+    adsPerformance,
     adsProductAds,
     adsCoverage,
     // —— 广告写操作(dry-run/confirm 门槛;首次验证走测试账户=广告沙盒)——
@@ -141,10 +154,14 @@ async function main(): Promise<void> {
     adsCampaignExtend,
     adsKeywordCampaignLaunch,
     adsCampaignState,
+    adsStateBatch,
     adsCampaignBudget,
+    adsBudgetBatch,
     adsKeywords,
     adsKeywordBid,
+    adsBidBatch,
     adsNegativeKeyword,
+    adsNegativeBatch,
     adsTestAccountCreate,
     adsTestAccountStatus,
     adsAuthUrl,

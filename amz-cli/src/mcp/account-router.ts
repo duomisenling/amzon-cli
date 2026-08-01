@@ -89,24 +89,30 @@ export class MultiAccountMcpRouter {
         throw new McpError(ErrorCode.InvalidParams, '工具调用缺少参数对象，必须明确提供 account');
       }
       const account = rawArgs['account'];
-      if (typeof account !== 'string' || !this.accounts.includes(account)) {
+      // 账号名大小写不敏感:把请求值归一到配置里的规范名(如 cycayit → Cycayit),
+      // 再按规范名路由到隔离子进程,子进程返回的也是规范名。
+      const canonical =
+        typeof account === 'string'
+          ? this.accounts.find((a) => a.toLowerCase() === account.toLowerCase())
+          : undefined;
+      if (!canonical) {
         throw new McpError(
           ErrorCode.InvalidParams,
-          `account 无效或未提供；必须明确选择：${this.accounts.join(' / ')}`,
+          `account 无效或未提供；必须明确选择:${this.accounts.join(' / ')}`,
         );
       }
 
       const childArgs = { ...rawArgs };
       delete childArgs['account'];
-      const client = await this.clientFor(account);
+      const client = await this.clientFor(canonical);
       const result = await client.callTool({
         name: request.params.name,
         arguments: childArgs,
       });
-      if (!result.isError && result.structuredContent?.['account'] !== account) {
+      if (!result.isError && result.structuredContent?.['account'] !== canonical) {
         throw new McpError(
           ErrorCode.InternalError,
-          `店铺路由校验失败：请求 ${account}，子进程返回 ${String(result.structuredContent?.['account'])}`,
+          `店铺路由校验失败:请求 ${canonical},子进程返回 ${String(result.structuredContent?.['account'])}`,
         );
       }
       return result;

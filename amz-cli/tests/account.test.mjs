@@ -82,6 +82,29 @@ test('loads shared Broker settings before switching STORE', () => {
   assert.equal(env.SELLER_ID, undefined);
 });
 
+test('账号名大小写不敏感:小写 cycayit 匹配 Cycayit.env 并归一到规范名', () => {
+  const home = tempRoot();
+  mkdirSync(join(home, '.amz-cli', 'accounts'), { recursive: true });
+  writeFileSync(
+    join(home, '.amz-cli', 'accounts', 'Cycayit.env'),
+    'LWA_CLIENT_ID=cy-client\nSELLER_ID_NA=CY_SELLER\n',
+  );
+  const env = {};
+  const canonical = loadAccount('cycayit', { env, home, stderr: () => {} });
+  assert.equal(canonical, 'Cycayit'); // 返回文件实际大小写(规范名),供审计/路由统一使用
+  assert.equal(env.LWA_CLIENT_ID, 'cy-client');
+  assert.equal(env.SELLER_ID_NA, 'CY_SELLER');
+});
+
+test('精确大小写仍然优先命中,返回原名', () => {
+  const home = tempRoot();
+  mkdirSync(join(home, '.amz-cli', 'accounts'), { recursive: true });
+  writeFileSync(join(home, '.amz-cli', 'accounts', 'A.env'), 'SELLER_ID_NA=A_SELLER\n');
+  const env = {};
+  assert.equal(loadAccount('A', { env, home, stderr: () => {} }), 'A');
+  assert.equal(env.SELLER_ID_NA, 'A_SELLER');
+});
+
 test('falls back to the user config when cwd has no amz-cli settings', () => {
   const cwd = tempRoot();
   const home = tempRoot();
