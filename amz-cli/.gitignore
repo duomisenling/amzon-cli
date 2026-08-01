@@ -11,9 +11,12 @@
 /.npmrc
 /local-delivery/
 
-# 出口代理:setup.sh 在服务器上生成的配置含代理密码,绝不提交
-# (真实的主体↔域名↔出口IP↔密码对照表放 local-delivery/egress-proxy/,上面已整体忽略)
-/deploy/egress-proxy/generated/
+# 出口代理(多主体 IP 隔离):整套 WIP,模板里可能含真实服务器 IP,暂不入库
+/deploy/
+# 多主体隔离部署文档(配套 deploy/,含真实拓扑,暂不入库)
+/docs/多主体隔离部署.md
+# 新增命令的规格/工作笔记(命令已实现并发布,笔记不入库、不发包)
+/新增命令计划书.md
 *.credentials
 
 # 本机生成的 MCP 配置与安装包

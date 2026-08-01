@@ -5,6 +5,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { extractAccountArg, loadAccount, loadDotEnvIfPresent } from './internal/account.js';
+import { setAuditAccount } from './internal/audit.js';
 import { AdsClient } from './internal/client/ads-client.js';
 import type { SpApiClient } from './internal/client/client.js';
 import {
@@ -223,6 +224,10 @@ async function main(): Promise<void> {
     });
   } else {
     if (account) loadAccount(account);
+    // MCP 写操作的审计也按店铺记账:多店路由为每个账号起 `--account` 子进程,
+    // 每个子进程都走到这里,于是各自把审计归到自己的店铺(未指定则 default),
+    // 不再统一记成 default(与 cli.ts 的处理一致)。
+    setAuditAccount(account);
     server = createAmazonMcpServer({}, account ?? 'default');
   }
   await server.connect(new StdioServerTransport());
