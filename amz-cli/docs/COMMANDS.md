@@ -225,7 +225,7 @@ amz-cli listing mine --marketplace US
 # 只看有问题的 listing
 amz-cli listing mine --marketplace US --with-issue-severity ERROR
 # 只有 ASIN、想找本店铺对应的 SKU(编辑 listing / 建广告前常用)
-amz-cli listing mine --marketplace DE --asin B0H2TYPC26
+amz-cli listing mine --marketplace DE --asin B0XXXXXXXX
 # 多个 ASIN 一次批量解析(最多 20 个，不要逐个查询)
 amz-cli listing mine --marketplace FR --asin "B0AAAAAAAA,B0BBBBBBBB,B0CCCCCCCC"
 ```
@@ -574,7 +574,7 @@ amz-cli ads test-account-status
 
 > 预览会列出每条"当前→新"值并标 `no-change`(已是目标值)/`not-found`(远端没有),这两类自动跳过;整批无有效改动时不签发令牌。MCP 侧每条批量命令都有 `prepare_*` / `apply_*` 对,`apply` 仍受 `AMZ_MCP_ALLOW_WRITES=true` + 白名单约束、逐次真人审批。
 >
-> 多店铺:`--account` 大小写不敏感(`cycayit` 自动匹配 `Cycayit`)。
+> 多店铺:`--account` 大小写不敏感(`shop-a` 自动匹配账号文件 `Shop-A.env`)。
 
 ---
 
