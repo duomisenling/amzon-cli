@@ -8,6 +8,9 @@ on:
 
 permissions:
   contents: read
+  # npm 信任发布(Trusted Publishing/OIDC):CI 用短期 OIDC 凭证直接发布,
+  # 不需要在 GitHub 存任何 npm token。npmjs.com 包设置里需一次性登记本工作流。
+  id-token: write
 
 jobs:
   test-and-publish:
@@ -31,9 +34,11 @@ jobs:
           RELEASE_TAG: ${{ github.ref_name }}
         run: node -e "const p=require('./package.json'); if (process.env.RELEASE_TAG !== 'v'+p.version) { throw new Error('tag '+process.env.RELEASE_TAG+' does not match package v'+p.version); }"
 
+      # 信任发布要求 npm CLI ≥ 11.5;Node 20 自带的是 10.x,必须先升级
+      - run: npm install -g npm@latest
+
       - run: npm ci
       - run: npm test
       - run: npm pack --dry-run
+      # 无 token:凭 OIDC 身份发布(需先在 npmjs.com 包设置里登记本仓库+工作流)
       - run: npm publish --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
