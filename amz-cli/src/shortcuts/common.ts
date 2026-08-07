@@ -126,8 +126,10 @@ export function validateIsoTimeRange(
 }
 
 export function isIso8601(value: string): boolean {
+  // 时区偏移可省略:"2026-08-06T00:00:00" 是合法 ISO 8601 本地时间,
+  // 各命令发给 API 前会用 expandDateOnlyIso 补全成带偏移的完整时间戳。
   if (
-    !/^\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2}))?$/.test(value) ||
+    !/^\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}(?::\d{2})?(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})?)?$/.test(value) ||
     !Number.isFinite(Date.parse(value))
   ) {
     return false;
@@ -184,13 +186,27 @@ function utcOffsetAt(instantMs: number, timeZone: string): string {
  * 本地补全比报错更友好,且能按用户选定时区切日。
  */
 export function expandDateOnlyIso(value: string, endOfDay: boolean, timeZone = 'UTC'): string {
-  if (!isDateOnly(value)) return value;
-  const time = endOfDay ? '23:59:59' : '00:00:00';
-  if (timeZone === 'UTC') return `${value}T${time}Z`;
+  if (isDateOnly(value)) {
+    const time = endOfDay ? '23:59:59' : '00:00:00';
+    return attachOffset(value, time, timeZone);
+  }
+  // "有时分秒但没时区"(如 2026-08-06T00:00:00)是最常见的手误:API 必拒,
+  // 语义又无歧义(按所选时区理解),同样自动补上时区偏移而不是让上游报 400。
+  const noOffset = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}(?::\d{2})?)$/.exec(value);
+  if (noOffset) {
+    const time = noOffset[2]!.length === 5 ? `${noOffset[2]}:00` : noOffset[2]!;
+    return attachOffset(noOffset[1]!, time, timeZone);
+  }
+  return value; // 已带 Z/偏移或其他格式,原样交给校验与上游
+}
+
+/** 把"日期 + 时分秒"拼成带该时区偏移的完整 ISO 时间戳。 */
+function attachOffset(date: string, time: string, timeZone: string): string {
+  if (timeZone === 'UTC') return `${date}T${time}Z`;
   // 两步逼近:先按 UTC 同刻猜偏移,再用猜出的本地时刻重取一次(覆盖夏令时切换日)
-  const guess = utcOffsetAt(Date.parse(`${value}T${time}Z`), timeZone);
-  const offset = utcOffsetAt(Date.parse(`${value}T${time}${guess}`), timeZone);
-  return `${value}T${time}${offset}`;
+  const guess = utcOffsetAt(Date.parse(`${date}T${time}Z`), timeZone);
+  const offset = utcOffsetAt(Date.parse(`${date}T${time}${guess}`), timeZone);
+  return `${date}T${time}${offset}`;
 }
 
 /** 自动翻页命令的页数熔断上限(防上游 nextToken 异常导致的无限翻页)。 */

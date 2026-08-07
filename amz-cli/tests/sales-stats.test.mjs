@@ -101,3 +101,50 @@ test('sales stats:完整时间戳输入不做补全,原样传给 API', async () 
   await salesStats.execute(ctx);
   assert.equal(calls[0].query.interval, '2026-07-01T06:00:00Z--2026-07-02T06:00:00Z');
 });
+
+// ---- 无时区完整时间的自动补全(最常见的手误:2026-08-06T00:00:00 少了 Z)----
+
+test('有时分秒但无时区的时间自动补上所选时区偏移,不再被 API 拒', async () => {
+  const { isIso8601 } = await import('../dist/shortcuts/common.js');
+  // 本地校验先要放行(它是合法 ISO 8601 本地时间)
+  assert.equal(isIso8601('2026-08-06T00:00:00'), true);
+  assert.equal(isIso8601('2026-08-06T00:00'), true);
+  assert.equal(isIso8601('2026-08-06T99:00:00'), false, '非法时刻仍要拒');
+  // UTC:直接补 Z;缺秒补齐 :00
+  assert.equal(expandDateOnlyIso('2026-08-06T00:00:00', false, 'UTC'), '2026-08-06T00:00:00Z');
+  assert.equal(expandDateOnlyIso('2026-08-06T09:30', false, 'UTC'), '2026-08-06T09:30:00Z');
+  // 指定时区:补该时区当日偏移(柏林 8 月为夏令时 +02:00)
+  assert.equal(
+    expandDateOnlyIso('2026-08-06T00:00:00', false, 'Europe/Berlin'),
+    '2026-08-06T00:00:00+02:00',
+  );
+  // 已带 Z/偏移的原样不动
+  assert.equal(expandDateOnlyIso('2026-08-06T00:00:00Z', false, 'Europe/Berlin'), '2026-08-06T00:00:00Z');
+  assert.equal(
+    expandDateOnlyIso('2026-08-06T00:00:00+02:00', false, 'UTC'),
+    '2026-08-06T00:00:00+02:00',
+  );
+});
+
+test('sales stats:无时区的 --start/--end 走完整链路后 interval 带偏移', async () => {
+  let query;
+  const ctx = {
+    flags: {
+      marketplace: 'DE',
+      start: '2026-08-06T00:00:00',
+      end: '2026-08-06T23:59:59',
+      timezone: 'Europe/Berlin',
+      granularity: 'Total',
+    },
+    progress() {},
+    client: {
+      async get(_path, q) {
+        query = q;
+        return { payload: [] };
+      },
+    },
+  };
+  salesStats.validate(ctx.flags); // 本地校验放行
+  await salesStats.execute(ctx);
+  assert.equal(query.interval, '2026-08-06T00:00:00+02:00--2026-08-06T23:59:59+02:00');
+});

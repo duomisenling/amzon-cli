@@ -14,6 +14,7 @@ import { closeEgressAgents } from './internal/net/egress.js';
 import { registerSetupCommands } from './setup/commands.js';
 import { registerTools } from './tools/registry.js';
 import { authWhoami } from './shortcuts/auth/whoami.js';
+import { accountsList } from './shortcuts/auth/accounts.js';
 import { listingSearch } from './shortcuts/listing/catalog-search.js';
 import { listingGet } from './shortcuts/listing/catalog-get.js';
 import { listingMine, listingSku } from './shortcuts/listing/mine.js';
@@ -102,6 +103,7 @@ async function main(): Promise<void> {
   // 所有功能定义在这里挂载(一个功能 = shortcuts/ 下一个 ToolDefinition)
   registerTools(program, [
     authWhoami,
+    accountsList,
     // 出口自检:确认这个账号的请求实际从哪个 IP 发出(出口变化不会报错)
     doctorEgress,
     listingSearch,

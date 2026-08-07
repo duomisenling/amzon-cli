@@ -13,7 +13,7 @@
 
 import { AmzError } from '../../internal/errs/errors.js';
 import type { ToolDefinition } from '../../tools/types.js';
-import { daysAgoIso, isIso8601, resolveMarketplace, strFlag } from '../common.js';
+import { daysAgoIso, expandDateOnlyIso, isIso8601, resolveMarketplace, strFlag } from '../common.js';
 import { sanitizeOrder } from './sanitize.js';
 
 const ORDER_STATUSES = [
@@ -127,8 +127,11 @@ export const ordersList: ToolDefinition = {
   },
   execute: async (ctx) => {
     const mkt = resolveMarketplace(ctx.flags['marketplace']);
-    const createdAfter = strFlag(ctx.flags, 'createdAfter');
-    const updatedAfter = strFlag(ctx.flags, 'updatedAfter');
+    // 纯日期/无时区时间自动按 UTC 补全成完整时间戳(Orders API 必须带时区偏移)
+    const expand = (v: string | undefined): string | undefined =>
+      v === undefined ? undefined : expandDateOnlyIso(v, false, 'UTC');
+    const createdAfter = expand(strFlag(ctx.flags, 'createdAfter'));
+    const updatedAfter = expand(strFlag(ctx.flags, 'updatedAfter'));
 
     // 时间条件:显式时间参数优先;都没给则默认最近 N 天(N 默认 7)
     let timeQuery: Record<string, string>;

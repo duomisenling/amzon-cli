@@ -329,3 +329,14 @@ test('auth whoami without --region queries the default region and says which one
     if (saved !== undefined) process.env.SP_API_REGION = saved;
   }
 });
+
+// ───────────────────────────────── accounts list(列可用账号)
+
+test('accountNamesFromFiles:只取 .env 文件名、去后缀、按字母序;绝不读内容', async () => {
+  const { accountNamesFromFiles } = await import('../dist/shortcuts/auth/accounts.js');
+  assert.deepEqual(
+    accountNamesFromFiles(['ShopB.env', 'shopA.ENV', 'readme.md', '.env.bak', 'ShopC.env']),
+    ['ShopB', 'ShopC', 'shopA'].sort((a, b) => a.localeCompare(b)),
+  );
+  assert.deepEqual(accountNamesFromFiles([]), []);
+});
