@@ -106,11 +106,12 @@ export class MultiAccountMcpRouter {
 
       const childArgs = { ...rawArgs };
       delete childArgs['account'];
-      const client = await this.clientFor(canonical);
-      const result = await client.callTool({
-        name: request.params.name,
-        arguments: childArgs,
-      });
+      const result = await this.withAccountClient(canonical, (client) =>
+        client.callTool({
+          name: request.params.name,
+          arguments: childArgs,
+        }),
+      );
       // 回验也必须大小写不敏感:子进程的 loadAccount 会把账号名归一到凭证文件的
       // 实际大小写(shopa → ShopA.env 返回 "ShopA"),与 --accounts 里的写法
       // 可能只差大小写。严格比较会把每次成功调用都误判成路由失败。
@@ -156,8 +157,7 @@ export class MultiAccountMcpRouter {
     if (!this.toolsPromise) {
       this.toolsPromise = (async () => {
         const schemaAccount = this.accounts[0]!;
-        const source = await this.clientFor(schemaAccount);
-        const listed = await source.listTools();
+        const listed = await this.withAccountClient(schemaAccount, (client) => client.listTools());
         return listed.tools.map((tool) => addAccountInput(tool, this.accounts, schemaAccount));
       })().catch((error: unknown) => {
         this.toolsPromise = undefined;
@@ -165,6 +165,30 @@ export class MultiAccountMcpRouter {
       });
     }
     return this.toolsPromise;
+  }
+
+  /**
+   * 拿该账号的 client 执行一次调用;遇到"连接已关闭/transport"类错误
+   * (子进程崩溃或退出后 SDK 抛的就是这种)时,清掉缓存重连并重试一次。
+   * 只重试一次:重连后仍失败说明子进程起不来,直接把错误抛给调用方,防死循环。
+   */
+  private async withAccountClient<T>(
+    account: string,
+    action: (client: AccountToolClient) => Promise<T>,
+  ): Promise<T> {
+    const cached = this.clientFor(account);
+    const client = await cached;
+    try {
+      return await action(client);
+    } catch (error) {
+      if (!isTransportClosedError(error)) throw error;
+      // 只在缓存还是"这一个失效 client"时才删:并发调用可能已经重连过了,
+      // 不能把别人刚建好的新连接一并删掉。
+      if (this.clients.get(account) === cached) this.clients.delete(account);
+      void Promise.resolve(client.close()).catch(() => {});
+      const fresh = await this.clientFor(account);
+      return action(fresh);
+    }
   }
 
   private clientFor(account: string): Promise<AccountToolClient> {
@@ -178,6 +202,12 @@ export class MultiAccountMcpRouter {
     }
     return client;
   }
+}
+
+/** 是否是"底层连接已断"类错误:SDK 在子进程退出后抛 "Connection closed" / "Not connected"。 */
+function isTransportClosedError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /connection closed|not connected|transport (?:is )?closed|EPIPE|ECONNRESET/i.test(message);
 }
 
 function inheritedEnvironment(env: NodeJS.ProcessEnv): Record<string, string> {

@@ -127,6 +127,7 @@ export function auditLog(rec: AuditRecord): void {
   // 入上报缓冲(配了中央地址才最终 flush)
   if (process.env['AMZ_AUDIT_HTTP']?.trim()) {
     uploadBuffer.push(line);
+    enforceUploadBufferLimit();
     // 常驻进程(如多服务器长期发请求)不能只等退出:攒够一批就先异步发一批。
     if (uploadBuffer.length >= UPLOAD_BATCH_THRESHOLD) void flushAuditUploads();
   }
@@ -136,15 +137,37 @@ export function auditLog(rec: AuditRecord): void {
 const UPLOAD_BATCH_THRESHOLD = 50;
 
 /**
- * 进程退出前把本次运行的审计行一次性上报到中央服务器(若配置了 AMZ_AUDIT_HTTP)。
- * 短超时、失败即忽略——上报是旁路,本地文件是底账,绝不拖慢或阻断命令。
+ * 缓冲硬上限:服务器长期不可达时,失败批会被回填,常驻进程的缓冲不能无限增长。
+ * 超上限静默丢最旧的行——本地文件仍是完整底账,上报本来就是"额外一路"。
  */
-export async function flushAuditUploads(): Promise<void> {
+const UPLOAD_BUFFER_HARD_LIMIT = 500;
+
+function enforceUploadBufferLimit(): void {
+  if (uploadBuffer.length > UPLOAD_BUFFER_HARD_LIMIT) {
+    uploadBuffer.splice(0, uploadBuffer.length - UPLOAD_BUFFER_HARD_LIMIT);
+  }
+}
+
+/** 并发 flush 串行化:后一次等前一次结束再看缓冲,失败回填时不会把同一批重复上报。 */
+let flushChain: Promise<void> = Promise.resolve();
+
+/**
+ * 进程退出前把本次运行的审计行一次性上报到中央服务器(若配置了 AMZ_AUDIT_HTTP)。
+ * 短超时、失败不阻断——上报是旁路,本地文件是底账,绝不拖慢或阻断命令。
+ * 失败的批会按原顺序回填缓冲,等下一次 flush(下一批攒够或进程退出前)一起补发。
+ */
+export function flushAuditUploads(): Promise<void> {
+  const next = flushChain.then(() => flushOnce());
+  // flushOnce 自身吞掉所有异常;这里再兜一层,保证链上永远不挂着 rejected promise。
+  flushChain = next.catch(() => {});
+  return next;
+}
+
+async function flushOnce(): Promise<void> {
   const url = process.env['AMZ_AUDIT_HTTP']?.trim();
   if (!url || uploadBuffer.length === 0) return;
   const token = process.env['AMZ_AUDIT_TOKEN']?.trim();
-  const body = uploadBuffer.join('\n'); // ndjson
-  uploadBuffer.length = 0;
+  const batch = uploadBuffer.splice(0, uploadBuffer.length);
   try {
     // 刻意用普通 fetch,不走 net/egress 的代理:这里打的是自建审计服务器,
     // 不是亚马逊。走代理纯属绕远,还会把代理地址暴露给不需要知道的一方。
@@ -155,10 +178,13 @@ export async function flushAuditUploads(): Promise<void> {
         'Content-Type': 'application/x-ndjson',
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
       },
-      body,
+      body: batch.join('\n'), // ndjson
       signal: AbortSignal.timeout(5000),
     });
   } catch {
-    // 上报失败不影响命令结果;本地文件仍有完整记录。
+    // 上报失败不影响命令结果;把这批放回缓冲头部(保持原顺序)等下次补发,
+    // 回填后仍受硬上限约束。本地文件始终有完整记录。
+    uploadBuffer.unshift(...batch);
+    enforceUploadBufferLimit();
   }
 }

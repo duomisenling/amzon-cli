@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { AmzError } from '../internal/errs/errors.js';
 import type { PackageInfo } from '../internal/package-info.js';
 import { initUserConfig, userConfigPath } from './config.js';
@@ -29,7 +29,9 @@ interface InstallOptions {
 }
 
 export function createInstallPlan(info: PackageInfo, home?: string): InstallPlan {
-  const spec = `${info.name}@${info.version}`;
+  // 必须装 @latest 而不是当前运行版本:从旧版 CLI 跑 amz-cli install 时,
+  // info.version 是旧版号,按它装等于"永远装回旧版",升级就失效了。
+  const spec = `${info.name}@latest`;
   return {
     package: spec,
     commands: [
@@ -46,8 +48,8 @@ export function createInstallPlan(info: PackageInfo, home?: string): InstallPlan
     ],
     configPath: userConfigPath(home),
     effects: [
-      '安装或升级全局 amz-cli 与 amz-cli-mcp 命令',
-      '安装与当前 npm 包同版本的 amz-cli Agent Skill',
+      '安装或升级全局 amz-cli 与 amz-cli-mcp 命令到 npm 最新版',
+      '安装与新装全局包同版本的 amz-cli Agent Skill(从新装的全局包目录读取)',
       '首次安装时创建不含真实凭证的用户配置模板；已有配置绝不覆盖',
     ],
   };
@@ -75,6 +77,7 @@ export function installAmzCli(info: PackageInfo, options: InstallOptions = {}): 
       });
 
     runNpm(['install', '--global', plan.package]);
+    // Skill 从"刚装好的全局包目录"读取,而不是当前运行的包:保证升级后装的是新版 Skill。
     const globalRoot = runNpm(['root', '--global'], true).trim();
     const globalPackageRoot = join(globalRoot, ...info.name.split('/'));
     const skillPath = join(globalPackageRoot, 'skills', 'amz-cli');
@@ -105,8 +108,15 @@ export function resolveNpmTooling(
   env: NodeJS.ProcessEnv = process.env,
   execPath: string = process.execPath,
 ): NpmTooling {
+  // npm_execpath 不一定是 npm:经 pnpm/yarn 调起时它指向 pnpm.cjs / yarn.js,
+  // 旁边没有 npx-cli.js,硬用会直接失败。只有文件名以 "npm" 开头(npm-cli.js 等)
+  // 才采信,否则忽略,回退到 Node 自带的 npm 候选路径。
+  const execpathCandidate = env['npm_execpath'];
+  const execpathIsNpm =
+    typeof execpathCandidate === 'string' &&
+    basename(execpathCandidate).toLowerCase().startsWith('npm');
   const npmCandidates = [
-    env['npm_execpath'],
+    execpathIsNpm ? execpathCandidate : undefined,
     join(dirname(execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js'),
     join(dirname(dirname(execPath)), 'lib', 'node_modules', 'npm', 'bin', 'npm-cli.js'),
   ].filter((candidate): candidate is string => Boolean(candidate));

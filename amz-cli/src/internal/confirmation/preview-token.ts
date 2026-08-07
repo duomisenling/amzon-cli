@@ -1,9 +1,11 @@
 import { createHash, randomBytes } from 'node:crypto';
 import {
   mkdirSync,
+  readdirSync,
   readFileSync,
   renameSync,
   rmSync,
+  statSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
@@ -97,6 +99,7 @@ export function issuePreviewToken(
 ): IssuedPreviewToken {
   const dir = stateDir();
   mkdirSync(dir, { recursive: true, mode: 0o700 });
+  sweepStaleTokenFiles(dir, now);
 
   for (let attempt = 0; attempt < 3; attempt++) {
     const token = randomBytes(32).toString('base64url');
@@ -121,6 +124,44 @@ export function issuePreviewToken(
     }
   }
   throw new Error('failed to allocate preview token');
+}
+
+/**
+ * 签发时顺手清扫目录:过期令牌正常流程只在"再次被校验"时才删,
+ * 不清扫的话 ~/.amz-cli/previews 只增不减。清扫是尽力而为——
+ * 任何一步失败(读目录/读文件/并发被别的进程删掉)都跳过,绝不让签发失败。
+ */
+function sweepStaleTokenFiles(dir: string, now: number): void {
+  let names: string[];
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return;
+  }
+  for (const name of names) {
+    const path = join(dir, name);
+    try {
+      if (name.includes('.consumed-')) {
+        // 消费残留:rename 成功但 unlink 失败留下的中间文件,令牌早已失效,直接清。
+        rmSync(path, { force: true });
+        continue;
+      }
+      if (!name.endsWith('.json')) continue;
+      let expired = false;
+      try {
+        const record = JSON.parse(readFileSync(path, 'utf8')) as Partial<PreviewRecord>;
+        const expiresAt = Date.parse(record.expiresAt ?? '');
+        // 内容损坏(expiresAt 解析不出)也当过期:校验路径本来就会拒掉它。
+        expired = !Number.isFinite(expiresAt) || now >= expiresAt;
+      } catch {
+        // 文件读不出来(并发消费/半写入):按 mtime 超过 TTL 兜底判断,拿不到就跳过。
+        expired = now - statSync(path).mtimeMs > TOKEN_TTL_MS;
+      }
+      if (expired) rmSync(path, { force: true });
+    } catch {
+      // 并发删除、权限等问题:跳过这个文件,继续清别的;清扫失败不影响签发。
+    }
+  }
 }
 
 /**
@@ -223,5 +264,10 @@ export function verifyAndConsumePreviewToken(
     }
     throw err;
   }
-  unlinkSync(consumedPath);
+  try {
+    unlinkSync(consumedPath);
+  } catch {
+    // rename 成功即已完成消费;清理失败只会留下 .consumed-* 残留文件,
+    // 下次签发令牌时会被顺手清掉,绝不能因此中断已确认的执行。
+  }
 }

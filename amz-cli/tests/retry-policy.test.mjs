@@ -72,7 +72,9 @@ test('non-idempotent POST is not replayed after an ambiguous 5xx', async () => {
 });
 
 test('SP write network failure is reported as unknown and never marked retryable', async () => {
+  let calls = 0;
   globalThis.fetch = async () => {
+    calls++;
     throw new DOMException('request timed out', 'AbortError');
   };
   const client = new SpApiClient(credentials);
@@ -84,6 +86,26 @@ test('SP write network failure is reported as unknown and never marked retryable
       error?.hintAgent === 'report_to_human' &&
       error?.retryable === false,
   );
+  // 写请求结果未知,绝不重放:只允许发出一次
+  assert.equal(calls, 1);
+});
+
+// —— 读请求(replaySafe)的网络错误自动退避重试;写请求保持一次即抛 ——
+
+test('SP 读请求网络错误自动退避重试后成功', async () => {
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls++;
+    if (calls === 1) throw new Error('socket hang up');
+    return new Response('{"payload":{"ok":1}}', {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  };
+  const client = new SpApiClient(credentials);
+  // attempt 0 的退避约 1~1.5 秒,真实等待可接受
+  assert.deepEqual(await client.get('/orders/v0/orders'), { payload: { ok: 1 } });
+  assert.equal(calls, 2);
 });
 
 test('SP write with an invalid successful response is not presented as retryable', async () => {
@@ -271,6 +293,23 @@ test('广告写请求 2xx 后读响应体失败报"写结果未知"', async () =
       error?.hintAgent === 'report_to_human' &&
       error?.retryable === false,
   );
+});
+
+test('广告读请求网络错误自动退避重试后成功', async () => {
+  useFakeAdsCreds();
+  let adsCalls = 0;
+  globalThis.fetch = async (input) => {
+    if (new URL(input).hostname === 'api.amazon.com') return lwaTokenResponse();
+    adsCalls++;
+    if (adsCalls === 1) throw new Error('socket hang up');
+    return new Response('{"profiles":[]}', {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  };
+  const client = new AdsClient();
+  assert.deepEqual(await client.request('GET', '/v2/profiles'), { profiles: [] });
+  assert.equal(adsCalls, 2);
 });
 
 test('广告读请求 2xx 后读响应体失败归为可重试网络错误', async () => {

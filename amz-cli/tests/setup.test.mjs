@@ -7,7 +7,7 @@ import { afterEach, test } from 'node:test';
 import { promisify } from 'node:util';
 import { readPackageInfo } from '../dist/internal/package-info.js';
 import { initUserConfig, userConfigPath } from '../dist/setup/config.js';
-import { createInstallPlan, installAmzCli } from '../dist/setup/install.js';
+import { createInstallPlan, installAmzCli, resolveNpmTooling } from '../dist/setup/install.js';
 import {
   createCherryMcpConfig,
   parseMcpAccounts,
@@ -62,11 +62,12 @@ test('install dry-run describes changes without invoking npm or touching config'
 
   assert.equal(result.dryRun, true);
   assert.deepEqual(result.plan, createInstallPlan(info, home));
-  assert.equal(result.plan.package, 'amz-cli@9.8.7');
+  // 必须装 @latest 而不是当前运行版本:否则旧版 CLI 跑 install 永远装回旧版,升级失效
+  assert.equal(result.plan.package, 'amz-cli@latest');
   assert.equal(result.plan.configPath, join(home, '.amz-cli', '.env'));
 });
 
-test('installer uses the exact package version and its packaged Skill', () => {
+test('installer installs the latest npm version and its packaged Skill', () => {
   const home = tempRoot('install-home');
   const globalRoot = tempRoot('global-root');
   const skillDir = join(globalRoot, 'amz-cli', 'skills', 'amz-cli');
@@ -94,7 +95,7 @@ test('installer uses the exact package version and its packaged Skill', () => {
   );
 
   assert.deepEqual(npmCalls, [
-    ['install', '--global', 'amz-cli@1.2.3'],
+    ['install', '--global', 'amz-cli@latest'],
     ['root', '--global'],
   ]);
   assert.deepEqual(npxCalls, [
@@ -102,6 +103,32 @@ test('installer uses the exact package version and its packaged Skill', () => {
   ]);
   assert.equal(result.globalPackageRoot, join(globalRoot, 'amz-cli'));
   assert.equal(result.config.created, true);
+});
+
+test('resolveNpmTooling 忽略 pnpm/yarn 的 npm_execpath,回退到 Node 自带 npm', () => {
+  // 模拟 Node 自带的 npm(execPath 旁的 node_modules/npm/bin)
+  const nodeDir = tempRoot('npm-tooling-node');
+  const npmBin = join(nodeDir, 'node_modules', 'npm', 'bin');
+  mkdirSync(npmBin, { recursive: true });
+  writeFileSync(join(npmBin, 'npm-cli.js'), '// fake npm cli\n', 'utf8');
+  writeFileSync(join(npmBin, 'npx-cli.js'), '// fake npx cli\n', 'utf8');
+  const execPath = join(nodeDir, 'node.exe');
+
+  // 模拟经 pnpm 调起:npm_execpath 指向 pnpm.cjs,旁边没有 npx-cli.js
+  const pnpmDir = tempRoot('npm-tooling-pnpm');
+  const pnpmCli = join(pnpmDir, 'pnpm.cjs');
+  writeFileSync(pnpmCli, '// fake pnpm cli\n', 'utf8');
+
+  const viaPnpm = resolveNpmTooling({ npm_execpath: pnpmCli }, execPath);
+  assert.equal(viaPnpm.npmCli, join(npmBin, 'npm-cli.js'));
+  assert.equal(viaPnpm.npxCli, join(npmBin, 'npx-cli.js'));
+
+  // 真正的 npm_execpath(npm-cli.js)仍然优先采信
+  const realNpmDir = tempRoot('npm-tooling-real');
+  writeFileSync(join(realNpmDir, 'npm-cli.js'), '// fake npm cli\n', 'utf8');
+  writeFileSync(join(realNpmDir, 'npx-cli.js'), '// fake npx cli\n', 'utf8');
+  const viaNpm = resolveNpmTooling({ npm_execpath: join(realNpmDir, 'npm-cli.js') }, execPath);
+  assert.equal(viaNpm.npmCli, join(realNpmDir, 'npm-cli.js'));
 });
 
 test('installer fails safely when the published package is missing its Skill', () => {

@@ -18,7 +18,7 @@
 import { AmzError } from '../errs/errors.js';
 import { auditLog } from '../audit.js';
 import { adsUserAgent } from '../user-agent.js';
-import { amazonFetch } from '../net/egress.js';
+import { amazonFetch, type EgressResponse } from '../net/egress.js';
 import { progress } from '../errs/output.js';
 import { exchangeLwaToken } from '../credential/lwa.js';
 import { brokerConfigFromEnv, mintFromBroker } from '../credential/broker.js';
@@ -181,41 +181,55 @@ export class AdsClient {
       }
 
       // 按账号配置的代理发出(ADS_PROXY,留空则复用 SP_API_PROXY;都没配 = 直连)
-      const resp = await amazonFetch(
-        new URL(path, auth.endpoint),
-        {
-          method,
-          headers,
-          body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
-          signal: AbortSignal.timeout(60_000),
-        },
-        'ads',
-      ).catch((err: unknown) => {
-        // 代理配置错误在发出任何字节之前就抛出,是 AmzError。原样上抛:
-        // 包装成 write_result_unknown 会误导用户去核对一次根本没发出的写入。
-        if (err instanceof AmzError) throw err;
-        if (!replaySafe) {
+      let resp: EgressResponse;
+      try {
+        resp = await amazonFetch(
+          new URL(path, auth.endpoint),
+          {
+            method,
+            headers,
+            body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
+            signal: AbortSignal.timeout(60_000),
+          },
+          'ads',
+        ).catch((err: unknown) => {
+          // 代理配置错误在发出任何字节之前就抛出,是 AmzError。原样上抛:
+          // 包装成 write_result_unknown 会误导用户去核对一次根本没发出的写入。
+          if (err instanceof AmzError) throw err;
+          if (!replaySafe) {
+            throw new AmzError({
+              type: 'upstream_error',
+              subtype: 'ads.write_result_unknown',
+              hintAgent: 'report_to_human',
+              hintHuman:
+                `广告 ${method.toUpperCase()} 写请求发生网络中断或超时，无法判断 Amazon Ads 是否已经执行。` +
+                '不要自动重试；请先查询广告后台或使用只读命令核对结果。',
+              message: `Ads ${method.toUpperCase()} ${path} failed after dispatch; write result is ambiguous: ${err instanceof Error ? err.message : String(err)}`,
+              cause: err,
+            });
+          }
           throw new AmzError({
             type: 'upstream_error',
-            subtype: 'ads.write_result_unknown',
-            hintAgent: 'report_to_human',
-            hintHuman:
-              `广告 ${method.toUpperCase()} 写请求发生网络中断或超时，无法判断 Amazon Ads 是否已经执行。` +
-              '不要自动重试；请先查询广告后台或使用只读命令核对结果。',
-            message: `Ads ${method.toUpperCase()} ${path} failed after dispatch; write result is ambiguous: ${err instanceof Error ? err.message : String(err)}`,
+            subtype: 'ads.network_error',
+            hintAgent: 'backoff_and_retry',
+            hintHuman: '连不上亚马逊广告接口,请检查网络后重试。',
+            message: `Ads API request failed: ${err instanceof Error ? err.message : String(err)}`,
+            retryable: true,
             cause: err,
           });
-        }
-        throw new AmzError({
-          type: 'upstream_error',
-          subtype: 'ads.network_error',
-          hintAgent: 'backoff_and_retry',
-          hintHuman: '连不上亚马逊广告接口,请检查网络后重试。',
-          message: `Ads API request failed: ${err instanceof Error ? err.message : String(err)}`,
-          retryable: true,
-          cause: err,
         });
-      });
+      } catch (err) {
+        // 读请求(replaySafe)的可重试网络错误(ads.network_error)进指数退避重试,
+        // 与 429/5xx 共用同一个 attempt 计数和上限。写请求的"结果未知"与 egress
+        // 的代理配置错误都不带 retryable,保持一次即抛。
+        if (replaySafe && err instanceof AmzError && err.retryable && attempt < 3) {
+          const backoffMs = Math.min(2 ** attempt * 1000 + Math.random() * 500, 15_000);
+          progress(`· 连不上广告接口,${Math.round(backoffMs / 1000)}s 后自动重试(第 ${attempt + 1}/3 次)...`);
+          await new Promise((r) => setTimeout(r, backoffMs));
+          continue;
+        }
+        throw err;
+      }
 
       if (resp.ok) {
         if (resp.status === 204) {

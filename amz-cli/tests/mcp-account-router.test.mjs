@@ -214,6 +214,55 @@ test('concurrent prepares remain routed to their explicitly selected accounts', 
   }
 });
 
+test('子进程崩溃后自动重连:transport 类错误清缓存并重试一次成功', async () => {
+  stateDir = mkdtempSync(join(tmpdir(), 'amz-mcp-router-state-'));
+  process.env.AMZ_CLI_STATE_DIR = stateDir;
+  const baseConnector = inMemoryConnector();
+  let connects = 0;
+  const router = new MultiAccountMcpRouter(['shop-b'], {
+    // 第一次连接返回"已崩溃"的 client:callTool 抛 SDK 在子进程退出后的典型错误。
+    // 第二次连接返回正常 client,模拟路由自动重建子进程。
+    connector: async (account) => {
+      connects++;
+      const real = await baseConnector(account);
+      if (connects === 1) {
+        return {
+          listTools: () => real.listTools(),
+          callTool: async () => {
+            throw new Error('MCP error -32000: Connection closed');
+          },
+          close: () => real.close(),
+        };
+      }
+      return real;
+    },
+    version: '1.0.0-test',
+  });
+  const client = new Client({ name: 'router-test-client', version: '1.0.0' });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await Promise.all([router.connect(serverTransport), client.connect(clientTransport)]);
+  try {
+    const prepared = await client.callTool({
+      name: 'prepare_keyword_campaign',
+      arguments: { account: 'shop-b', plan: plan('crash-recovery') },
+    });
+    assert.equal(prepared.isError, undefined, '子进程崩溃后重连重试竟然没有成功');
+    assert.equal(prepared.structuredContent.account, 'shop-b');
+    assert.equal(connects, 2, '应该恰好重连一次');
+
+    // 重连后的 client 已被缓存:再调用不再新建连接
+    const again = await client.callTool({
+      name: 'prepare_keyword_campaign',
+      arguments: { account: 'shop-b', plan: plan('crash-recovery-2') },
+    });
+    assert.equal(again.isError, undefined);
+    assert.equal(connects, 2);
+  } finally {
+    await client.close();
+    await router.close();
+  }
+});
+
 test('production stdio connector starts a fixed-account child without calling Amazon', async () => {
   const home = mkdtempSync(join(tmpdir(), 'amz-mcp-router-home-'));
   const accountDir = join(home, '.amz-cli', 'accounts');

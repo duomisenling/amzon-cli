@@ -64,18 +64,29 @@ export interface RestockCandidate {
   inbound: number;
   available: number;
   unitsSold: number;
+  /** 同一 ASIN 有多个 SKU 行时为 true:本行 unitsSold 是整个 ASIN 的销量,不是本 SKU 的 */
+  sharedAsinSales?: boolean;
 }
 
 /**
  * 纯 JOIN + 筛选 + 排序,不碰 I/O(便于单测)。
  * 命中条件:可售+在途 <= stockThreshold(断货/告急) 且 期间销量 >= minUnits(以前好卖)。
  * 按期间销量降序,好卖又缺货的排在最前。
+ *
+ * 口径说明:销量报告只有 ASIN 粒度、库存是 SKU 逐行,JOIN 后同一 ASIN 的每个 SKU 行
+ * 都记入该 ASIN 的全部销量 —— 断货 SKU 可能因同 ASIN 另一 SKU 在卖而入选,是粗筛口径。
+ * 不改聚合逻辑,只给这些行打 sharedAsinSales 标记,直指需要人工判断的行。
  */
 export function selectRestockCandidates(
   items: RestockInventoryItem[],
   unitsByAsin: Record<string, number>,
   opts: RestockOptions,
 ): RestockCandidate[] {
+  // 统计每个 ASIN 在库存里出现的 SKU 行数,>1 的行销量是"共享"的
+  const asinRowCount: Record<string, number> = {};
+  for (const it of items) {
+    if (it.asin) asinRowCount[it.asin] = (asinRowCount[it.asin] ?? 0) + 1;
+  }
   const candidates = items
     .map((it): RestockCandidate => ({
       sku: it.sku,
@@ -85,6 +96,7 @@ export function selectRestockCandidates(
       inbound: it.inbound,
       available: it.fulfillable + it.inbound,
       unitsSold: it.asin ? unitsByAsin[it.asin] ?? 0 : 0,
+      ...(it.asin && (asinRowCount[it.asin] ?? 0) > 1 ? { sharedAsinSales: true } : {}),
     }))
     .filter((c) => c.available <= opts.stockThreshold && c.unitsSold >= opts.minUnits)
     .sort((a, b) => b.unitsSold - a.unitsSold);
@@ -239,6 +251,11 @@ export const restockCandidates: ToolDefinition = {
       minUnits,
       scannedSkus: inventory.length,
       count: candidates.length,
+      // 口径说明:销量只有 ASIN 粒度,同 ASIN 多 SKU 时各行销量是共享的(见标记)
+      salesGranularity: 'asin',
+      salesGranularityNote:
+        '销量按 ASIN 口径统计;同一 ASIN 有多个 SKU 时,各 SKU 行显示的是整个 ASIN 的销量' +
+        '(这些行带 sharedAsinSales=true 标记),请结合 SKU 实际情况判断是否补货。',
       candidates,
       ...(note ? { note } : {}),
     };

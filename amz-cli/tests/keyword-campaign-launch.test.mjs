@@ -8,6 +8,7 @@ import {
   executeKeywordCampaignPlan,
   keywordCampaignPreview,
   parseKeywordCampaignPlan,
+  preflightCampaignProducts,
   preflightKeywordCampaignProducts,
 } from '../dist/shortcuts/ads/keyword-campaign-launch.js';
 
@@ -308,6 +309,44 @@ test('product preflight rejects marketplace and Ads region mismatch without a re
   await assert.rejects(
     preflightKeywordCampaignProducts({ get: async () => { requested = true; } }, parsed),
     /region=na/,
+  );
+  assert.equal(requested, false);
+});
+
+test('含逗号的 SKU 在方案校验阶段就被拒绝,错误信息可理解', () => {
+  // Listings 批量核对以逗号分隔 identifiers 且无法转义,含逗号 SKU 会被误拆成
+  // 多个错误标识 → 误报"SKU 不在店铺"。明确拦截好过错误放行。
+  const p = plan({ products: [{ sku: 'BAD,SKU-1' }] });
+  delete p.product;
+  assert.throws(
+    () => parseKeywordCampaignPlan(JSON.stringify(p)),
+    (error) =>
+      error instanceof AmzError &&
+      error.type === 'invalid_param' &&
+      /逗号/.test(error.hintHuman) &&
+      /不含逗号的 SKU|联系管理员/.test(error.hintHuman),
+  );
+});
+
+test('preflight 对含逗号 SKU 直接拦截,不发 Listings 请求(覆盖非 zod 来源的入口)', async () => {
+  let requested = false;
+  const client = {
+    get: async () => {
+      requested = true;
+      return { items: [] };
+    },
+  };
+  await assert.rejects(
+    preflightCampaignProducts(client, {
+      marketplace: 'US',
+      region: 'na',
+      products: [{ sku: 'BAD,SKU-1' }, { sku: 'GOOD-SKU-2' }],
+    }),
+    (error) =>
+      error instanceof AmzError &&
+      error.type === 'invalid_param' &&
+      error.subtype === 'ads.keyword_campaign_sku_comma_unsupported' &&
+      /BAD,SKU-1/.test(error.hintHuman),
   );
   assert.equal(requested, false);
 });

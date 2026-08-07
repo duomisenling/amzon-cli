@@ -33,6 +33,11 @@ const productSchema = z.object({
     .string()
     .trim()
     .min(1)
+    // Listings 批量核对接口以逗号分隔 identifiers 且无法转义:含逗号的 SKU 会被拆成
+    // 多个错误标识,导致误报"SKU 不在店铺"。在方案校验阶段明确拦截,好过错误放行。
+    .refine((sku) => !sku.includes(','), {
+      message: 'SKU 含逗号,批量核对不支持;请改用不含逗号的 SKU 或联系管理员',
+    })
     .describe('本店铺 merchant SKU。必填；只有 ASIN 时必须先用 listing mine 批量解析，不能把 ASIN 直接用于广告写入。'),
   asin: z
     .string()
@@ -156,6 +161,22 @@ export async function preflightCampaignProducts(
 
   if (plan.products.length === 0) {
     return { marketplace: marketplace.country, verifiedProducts: [] };
+  }
+
+  // 与 productSchema 的校验重复设防:本函数还接收非 zod 来源的 CampaignProductSelection
+  //(扩展已有广告的路径),含逗号的 SKU 同样会被 identifiers 逗号分隔误拆。
+  const commaSkus = plan.products.filter((p) => p.sku.includes(',')).map((p) => p.sku);
+  if (commaSkus.length > 0) {
+    throw new AmzError({
+      type: 'invalid_param',
+      subtype: 'ads.keyword_campaign_sku_comma_unsupported',
+      param: 'products[].sku',
+      hintAgent: 'fix_param',
+      hintHuman:
+        `以下 SKU 含逗号,批量核对不支持:${commaSkus.join('、')}。` +
+        '(Listings 接口以逗号分隔多个 SKU,无法转义。)请改用不含逗号的 SKU 或联系管理员。',
+      message: `SKUs containing commas cannot be batch-verified via listings identifiers: ${commaSkus.join(' | ')}`,
+    });
   }
 
   const sellerId = await resolveSellerId({}, marketplace.region, client);

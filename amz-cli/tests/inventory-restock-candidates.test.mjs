@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { AmzError } from '../dist/internal/errs/errors.js';
 import {
   selectRestockCandidates,
   parseUnitsByAsin,
@@ -85,6 +86,65 @@ test('无 asin 的库存项按 0 销量处理,不误入选', () => {
     { stockThreshold: 0, minUnits: 1 },
   );
   assert.deepEqual(out, []);
+});
+
+test('同一 ASIN 多个 SKU 行都带 sharedAsinSales 标记,单 SKU 的 ASIN 不带', () => {
+  const rows = [
+    { sku: 'TWIN-A', asin: 'B0TWIN', fulfillable: 0, inbound: 0 },
+    { sku: 'TWIN-B', asin: 'B0TWIN', fulfillable: 0, inbound: 0 },
+    { sku: 'SOLO', asin: 'B0SOLO', fulfillable: 0, inbound: 0 },
+  ];
+  const out = selectRestockCandidates(rows, { B0TWIN: 50, B0SOLO: 20 }, {
+    stockThreshold: 0,
+    minUnits: 1,
+  });
+  const twins = out.filter((c) => c.asin === 'B0TWIN');
+  assert.equal(twins.length, 2);
+  for (const row of twins) {
+    // 两个 SKU 行显示的都是整个 ASIN 的 50 件销量 —— 用标记直指口径问题行
+    assert.equal(row.unitsSold, 50);
+    assert.equal(row.sharedAsinSales, true);
+  }
+  const solo = out.find((c) => c.asin === 'B0SOLO');
+  assert.equal(solo.unitsSold, 20);
+  assert.equal(solo.sharedAsinSales, undefined);
+});
+
+test('execute 结果带销量口径说明(salesGranularity + note),同 ASIN 两行都有标记', async () => {
+  const ctx = {
+    flags: { marketplace: 'US', minUnits: '0' },
+    progress() {},
+    client: {
+      // 库存单页:同一 ASIN 两个 SKU,全部断货
+      async get() {
+        return {
+          payload: {
+            inventorySummaries: [
+              { sellerSku: 'TWIN-A', asin: 'B0TWIN', inventoryDetails: { fulfillableQuantity: 0 } },
+              { sellerSku: 'TWIN-B', asin: 'B0TWIN', inventoryDetails: { fulfillableQuantity: 0 } },
+            ],
+          },
+        };
+      },
+      // 模拟销售报告被取消(期间无销量),跳过完整报告流程
+      async request() {
+        throw new AmzError({
+          type: 'upstream_error',
+          subtype: 'report.cancelled',
+          hintAgent: 'report_to_human',
+          hintHuman: '报告被取消',
+          message: 'report cancelled',
+        });
+      },
+    },
+  };
+  const result = await restockCandidates.execute(ctx);
+  assert.equal(result.salesGranularity, 'asin');
+  assert.match(result.salesGranularityNote, /ASIN 口径/);
+  assert.match(result.salesGranularityNote, /sharedAsinSales/);
+  assert.equal(result.candidates.length, 2);
+  assert.equal(result.candidates[0].sharedAsinSales, true);
+  assert.equal(result.candidates[1].sharedAsinSales, true);
 });
 
 test('parseUnitsByAsin 从 Sales & Traffic 报告抽取子 ASIN 销量', () => {

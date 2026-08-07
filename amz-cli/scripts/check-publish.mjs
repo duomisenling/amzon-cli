@@ -18,12 +18,48 @@ const ROOT = process.cwd();
 const failures = [];
 
 // ── 1. tsconfig 必须开 removeComments ────────────────────────────
+
+// 剥掉 JSONC 里的 // 与 /* */ 注释(tsconfig 允许注释,JSON.parse 不允许)。
+// 逐字符扫描并跟踪字符串状态:行尾注释、多行注释都能剥,字符串里的 "//"(如 URL)不误伤。
+function stripJsonComments(text) {
+  let out = '';
+  let inString = false;
+  let inLine = false;
+  let inBlock = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    const next = text[i + 1];
+    if (inLine) {
+      if (ch === '\n') { inLine = false; out += ch; }
+      continue;
+    }
+    if (inBlock) {
+      if (ch === '*' && next === '/') { inBlock = false; i++; }
+      continue;
+    }
+    if (inString) {
+      out += ch;
+      if (ch === '\\') { out += next ?? ''; i++; continue; }
+      if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') { inString = true; out += ch; continue; }
+    if (ch === '/' && next === '/') { inLine = true; i++; continue; }
+    if (ch === '/' && next === '*') { inBlock = true; i++; continue; }
+    out += ch;
+  }
+  return out;
+}
+
 {
   const raw = readFileSync(join(ROOT, 'tsconfig.json'), 'utf8');
-  // 简单剥掉 // 注释后再解析(tsconfig 允许注释,JSON.parse 不允许)
-  const json = JSON.parse(raw.replace(/^\s*\/\/.*$/gm, ''));
-  if (json.compilerOptions?.removeComments !== true) {
-    failures.push('tsconfig.json 没有开启 removeComments —— 源码注释会被打进 npm 包');
+  try {
+    const json = JSON.parse(stripJsonComments(raw));
+    if (json.compilerOptions?.removeComments !== true) {
+      failures.push('tsconfig.json 没有开启 removeComments —— 源码注释会被打进 npm 包');
+    }
+  } catch (err) {
+    failures.push(`tsconfig.json 剥注释后仍解析失败,请检查语法:${err?.message ?? err}`);
   }
 }
 
@@ -44,11 +80,23 @@ if (!existsSync(distDir)) {
 } else {
   for (const file of walk(distDir)) {
     const lines = readFileSync(file, 'utf8').split(/\r?\n/);
+    // `*` 开头的行只有处于 /* … */ 注释块内部才算注释:
+    // 编译产物里模板字符串的续行也可能以 `*` 开头,一律当注释会误报。
+    let inBlockComment = false;
     lines.forEach((line, i) => {
       const t = line.trim();
-      if (t.startsWith('#!')) return; // shebang 是必须的
-      if (t.startsWith('//') || t.startsWith('/*') || t.startsWith('*')) {
+      const report = () =>
         failures.push(`${file.slice(ROOT.length + 1)}:${i + 1} 编译产物里出现注释:${t.slice(0, 60)}`);
+      if (inBlockComment) {
+        report();
+        if (t.includes('*/')) inBlockComment = false;
+        return;
+      }
+      if (t.startsWith('#!')) return; // shebang 是必须的
+      if (t.startsWith('//')) { report(); return; }
+      if (t.startsWith('/*')) {
+        report();
+        if (!t.includes('*/')) inBlockComment = true;
       }
     });
   }
@@ -64,7 +112,8 @@ if (existsSync(blocklistPath)) {
 
   // package.json 的 files 字段决定了发布内容;这里检查其中的文本文件
   const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'));
-  const targets = [];
+  // package.json 本身被 npm 强制随包发布(不受 files 控制),也必须扫
+  const targets = [join(ROOT, 'package.json')];
   for (const entry of pkg.files ?? []) {
     const p = join(ROOT, entry.replace(/\/$/, ''));
     if (!existsSync(p)) continue;
@@ -85,10 +134,11 @@ if (existsSync(blocklistPath)) {
     }
   }
 
+  // 词表匹配不区分大小写:店铺名/内部代号换个大小写照样是泄漏
   for (const file of [...new Set(targets)]) {
-    const text = readFileSync(file, 'utf8');
+    const text = readFileSync(file, 'utf8').toLowerCase();
     for (const word of words) {
-      if (text.includes(word)) {
+      if (text.includes(word.toLowerCase())) {
         failures.push(`${file.slice(ROOT.length + 1)} 含内部词表中的词:「${word}」`);
       }
     }

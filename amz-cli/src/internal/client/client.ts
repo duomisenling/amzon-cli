@@ -4,7 +4,8 @@
 //   1. 注入 x-amz-access-token(2023-10 起 SP-API 不再要求 AWS SigV4 签名,
 //      已用真实凭证实测验证 —— 见 scripts/hello.mjs)
 //   2. 限流:bottleneck 控制请求节奏,从源头减少 429
-//   3. 429 / 5xx 指数退避重试(规格 §6.3 强制要求)
+//   3. 429 / 5xx 指数退避重试(规格 §6.3 强制要求);读请求(GET/HEAD/显式 retry5xx)
+//      的网络错误同样退避重试,写请求网络错误"结果未知,不得重放",一次即抛
 //   4. 把 HTTP 错误分类成类型化 AmzError,业务代码不接触裸 HTTP 错误
 
 import Bottleneck from 'bottleneck';
@@ -51,6 +52,18 @@ export class SpApiClient {
       try {
         resp = await limiter.schedule(() => this.doFetch(method, path, opts, replaySafe));
       } catch (err) {
+        // 读请求(replaySafe)的可重试网络错误(sp_api.network_error)进指数退避重试,
+        // 与 429/5xx 共用同一个 attempt 计数和上限。写请求的"结果未知"与 egress 的
+        // 代理配置错误都不带 retryable,保持一次即抛。重试期间不记审计失败行,
+        // 只在最终失败时记一条,避免同一次调用刷出多条失败底账。
+        if (replaySafe && err instanceof AmzError && err.retryable && attempt < MAX_RETRIES) {
+          const backoffMs = Math.min(2 ** attempt * 1000 + Math.random() * 500, 30_000);
+          progress(
+            `· 网络错误,${Math.round(backoffMs / 1000)}s 后自动重试(第 ${attempt + 1}/${MAX_RETRIES} 次)...`,
+          );
+          await sleep(backoffMs);
+          continue;
+        }
         auditLog({
           api: 'sp', method, path, region: opts.region, ok: false,
           errorSubtype: err instanceof AmzError ? err.subtype : 'network_error',
