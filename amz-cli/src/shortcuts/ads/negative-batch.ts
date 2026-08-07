@@ -194,7 +194,10 @@ export const adsNegativeBatch: ToolDefinition = {
       : readNegativeChangesFromFlags(ctx.flags);
 
     let successCount = 0;
+    // 结果不明 ≠ 失败:响应结构未识别,或网络中断(write_result_unknown)导致写入可能已生效。
+    // 否定词是创建型写入,把这些误计入 failed 会诱导重跑而产生重复否定词,必须分开统计。
     let unknownCount = 0;
+    const resultUnknownChunks: Array<{ size: number; reason: string }> = [];
     const errors: Array<Record<string, unknown>> = [];
     const failedChunks: Array<{ size: number; reason: string }> = [];
 
@@ -216,23 +219,30 @@ export const adsNegativeBatch: ToolDefinition = {
         successCount += group.success.length;
         errors.push(...group.error);
       } catch (err) {
-        const reason = err instanceof Error ? err.message : String(err);
-        failedChunks.push({ size: part.length, reason: reason.slice(0, 200) });
+        // 确定未发出/被拒的计入 failedChunks;结果不明(可能已创建)单独计入 resultUnknownChunks。
+        const ambiguous = err instanceof AmzError && err.subtype === 'ads.write_result_unknown';
+        const reason = (err instanceof Error ? err.message : String(err)).slice(0, 200);
+        const bucket = ambiguous ? resultUnknownChunks : failedChunks;
+        bucket.push({ size: part.length, reason });
       }
     }
 
     const failedCount = errors.length + failedChunks.reduce((s, c) => s + c.size, 0);
+    const resultUnknownCount = unknownCount + resultUnknownChunks.reduce((s, c) => s + c.size, 0);
     return {
       profileId,
       requested: confirmed.length,
       successCount,
       failedCount,
+      resultUnknownCount,
       ...(unknownCount > 0 ? { unknownResponseCount: unknownCount } : {}),
+      ...(resultUnknownChunks.length > 0 ? { resultUnknownChunks } : {}),
       ...(errors.length > 0 ? { errors } : {}),
       ...(failedChunks.length > 0 ? { failedChunks } : {}),
       note:
-        unknownCount > 0
-          ? '部分响应结构未识别,已如实标出(unknownResponseCount);请到广告后台核对这些是否创建成功,不要自动重试。'
+        resultUnknownCount > 0
+          ? `⚠️ 有 ${resultUnknownCount} 个否定词创建结果不明(网络中断或响应结构未识别),它们可能已经创建成功。` +
+            '不要直接重跑整批——重复提交会产生重复否定词;请先到广告后台核对这些词是否已存在,只对确认缺失的词重新预览。'
           : failedCount > 0
             ? '部分否定词创建失败(见 errors/failedChunks)。不要自动重试整批;只对失败项重新预览或到后台核对。'
             : '整批否定词已提交创建。否定词可随时在后台暂停/删除(可逆)。',

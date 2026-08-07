@@ -24,8 +24,10 @@
 - 账号文件中的 `SP_API_REGION=na` 和 `ADS_REGION=na` 只是未明确区域时的默认值，不代表默认店铺；明确站点或区域的命令会覆盖它们。
 - 本地模式不要填写 `BROKER_URL`、`TEAM_TOKEN`、`STORE`。
 - 店铺文件名大小写必须与 MCP 里的 `account` 一致。
+- 代理 `SP_API_PROXY`、`ADS_PROXY`、`EGRESS_LABEL`（可选）：让该账号的请求通过指定的代理服务器发出。**只写在各账号自己的文件里**，不要写进共享 `.env` 或系统环境变量。留空即直连，所以"某个账号就是要直连"不需要任何开关。
+- 配好代理后用 `amz-cli --account <账号> doctor egress` 自检：它会打印实际的出口 IP，并检查代理的目的地限制是否生效。
 
-多店铺模式不需要 `%USERPROFILE%\.amz-cli\.env`。切换账号时，CLI 会先清除上一个账号的 Client ID、Secret、Refresh Token 和 Seller ID，再加载新账号文件；每个账号文件必须自包含，不能依赖主 `.env` 或其他店铺。
+多店铺模式不需要 `%USERPROFILE%\.amz-cli\.env`。切换账号时，CLI 会先清除上一个账号的 Client ID、Secret、Refresh Token、Seller ID 和出口代理配置，再加载新账号文件；每个账号文件必须自包含，不能依赖主 `.env` 或其他店铺。
 
 ## 安全要求
 

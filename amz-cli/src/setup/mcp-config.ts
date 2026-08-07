@@ -31,6 +31,7 @@ interface McpConfigOptions {
   execPath?: string;
   serverPath?: string;
   allowedWrites?: readonly string[];
+  allowWrites?: boolean;
   platform?: NodeJS.Platform;
 }
 
@@ -121,8 +122,11 @@ export function createCherryMcpConfig(
   }
 
   const allowedWrites = options.allowedWrites ?? DEFAULT_MCP_ALLOWED_WRITES;
+  // 写入总开关默认关闭(显式写 false,而不是省略):这是 mcp/common.ts 承诺的
+  // "MCP 正式写入默认关闭,管理员确认后才能开启"。只有管理员传 --allow-writes
+  // 生成的配置才带 true;操作白名单照常写入,方便日后只翻转一个开关。
   const env = {
-    AMZ_MCP_ALLOW_WRITES: 'true',
+    AMZ_MCP_ALLOW_WRITES: options.allowWrites ? 'true' : 'false',
     AMZ_MCP_ALLOWED_WRITES: allowedWrites.join(','),
   };
   const mcpServers: Record<string, CherryMcpServerConfig> = {};

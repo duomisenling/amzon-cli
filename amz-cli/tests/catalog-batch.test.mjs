@@ -16,6 +16,13 @@ test('parseAsinList 支持换行/逗号/空格混合,去重保序', () => {
   );
 });
 
+test('parseAsinList 入口统一大写:小写输入归一,大小写重复只留一个', () => {
+  assert.deepEqual(
+    parseAsinList('b0aaaaaaaa\nB0AAAAAAAA, b0bbbbbbbb'),
+    ['B0AAAAAAAA', 'B0BBBBBBBB'],
+  );
+});
+
 test('parseAsinList 空输入返回空数组', () => {
   assert.deepEqual(parseAsinList('   \n  '), []);
 });
@@ -40,4 +47,15 @@ test('buildBatchRecords 查到的 found:true+摊平,查不到的 found:false,且
   assert.equal(out[2].found, true);
   assert.equal(out[2].asin, 'B0BBBBBBBB');
   assert.deepEqual(out[2].images, [{ x: 1 }]); // 额外数据集原样保留
+});
+
+test('buildBatchRecords 大小写不敏感匹配:小写请求也能命中 API 返回的大写 asin', () => {
+  const out = buildBatchRecords(
+    ['b0aaaaaaaa'],
+    [{ asin: 'B0AAAAAAAA', summaries: [{ itemName: 'A item' }] }],
+    ['summaries'],
+  );
+  assert.equal(out.length, 1);
+  assert.equal(out[0].found, true); // 修复前会被误标 found:false 静默丢弃
+  assert.equal(out[0].itemName, 'A item');
 });

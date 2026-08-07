@@ -17,6 +17,7 @@ import type { ToolContext, ToolDefinition } from '../../tools/types.js';
 import { resolveMarketplace, strFlag } from '../common.js';
 import { resolveSellerId } from '../listing/mine.js';
 import { setCampaignState } from './campaign-state.js';
+import { adsResponseGroup } from './common.js';
 
 const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'must use YYYY-MM-DD');
 const positiveMoney = z.number().finite().positive();
@@ -224,11 +225,6 @@ interface LaunchJournal {
   updatedAt: string;
 }
 
-interface BulkResult {
-  success: Array<Record<string, unknown>>;
-  error: Array<Record<string, unknown>>;
-}
-
 function isRealDate(value: string): boolean {
   const parsed = Date.parse(`${value}T00:00:00.000Z`);
   return Number.isFinite(parsed) && new Date(parsed).toISOString().slice(0, 10) === value;
@@ -349,15 +345,6 @@ function saveJournal(plan: KeywordCampaignPlan, journal: LaunchJournal): void {
   renameSync(temp, path);
 }
 
-function responseGroup(response: unknown, group: string): BulkResult {
-  const root = response as Record<string, unknown> | null;
-  const raw = root?.[group] as Record<string, unknown> | undefined;
-  return {
-    success: Array.isArray(raw?.['success']) ? (raw!['success'] as Array<Record<string, unknown>>) : [],
-    error: Array.isArray(raw?.['error']) ? (raw!['error'] as Array<Record<string, unknown>>) : [],
-  };
-}
-
 function idFrom(item: Record<string, unknown>, ...keys: string[]): string | undefined {
   for (const key of keys) {
     const direct = item[key];
@@ -385,8 +372,29 @@ function partialFailure(step: string, errors: unknown, successCount: number, exp
   });
 }
 
+/**
+ * HTTP 成功但结果无法确认:207 结构不识别,或成功项取不到 id。
+ * 对象可能已在远端创建,按 RESULT_UNKNOWN 熔断(不允许自动续跑,重跑会重复创建)——
+ * 与 bid-batch 对 UNKNOWN_RESPONSE_SHAPE"不武断判成功也不判失败"的处理哲学一致。
+ */
+function resultUnknown(step: string, response: unknown): AmzError {
+  return new AmzError({
+    type: 'upstream_error',
+    subtype: 'ads.keyword_campaign_result_unknown',
+    hintAgent: 'report_to_human',
+    hintHuman:
+      `“${step}”的响应结构无法识别或缺少对象 ID，对象可能已经创建成功。` +
+      '已停止并禁止自动续跑;请先在广告后台或只读命令核对已创建内容,不要重跑创建。',
+    message: `keyword campaign launch unrecognized write result at ${step}: ${JSON.stringify(response).slice(0, 500)}`,
+  });
+}
+
 function markFailure(plan: KeywordCampaignPlan, journal: LaunchJournal, error: unknown): never {
-  const ambiguous = error instanceof AmzError && error.subtype === 'ads.write_result_unknown';
+  // 客户端网络层的 ads.write_result_unknown 与命令层的"结构不识别/取不到 id"
+  // 都是结果不明:一律进 RESULT_UNKNOWN,阻断自动续跑,防止重复创建。
+  const ambiguous =
+    error instanceof AmzError &&
+    (error.subtype === 'ads.write_result_unknown' || error.subtype === 'ads.keyword_campaign_result_unknown');
   journal.status = ambiguous ? 'RESULT_UNKNOWN' : 'PARTIAL_FAILURE';
   journal.lastError = error instanceof AmzError ? error.toEnvelope() : String(error);
   saveJournal(plan, journal);
@@ -493,9 +501,16 @@ async function verifyCreatedObjects(client: AdsClient, plan: KeywordCampaignPlan
       verifiedProducts += 1;
     }
   }
+  // 回读接受 PAUSED 或 ENABLED:enableAfterCreate 计划在第 6 步启用后若 PARTIAL_FAILURE
+  // (远端实际已 ENABLED),续跑还会重新走回读验证;只认 PAUSED 会让续跑永远卡死。
+  const campaignState = campaign ? String(campaign['state']).toUpperCase() : '';
   const counts = {
     campaigns:
-      campaign && String(campaign['campaignId']) === journal.campaignId && campaign['state'] === 'PAUSED' ? 1 : 0,
+      campaign &&
+      String(campaign['campaignId']) === journal.campaignId &&
+      (campaignState === 'PAUSED' || campaignState === 'ENABLED')
+        ? 1
+        : 0,
     adGroups:
       adGroup &&
       String(adGroup['adGroupId']) === journal.adGroupId &&
@@ -544,13 +559,16 @@ export async function executeKeywordCampaignPlan(
         body: campaignPayload(plan),
         extraHeaders: { Prefer: 'return=representation' },
       });
-      const result = responseGroup(response, 'campaigns');
+      const result = adsResponseGroup(response, 'campaigns');
+      if (!result.known) throw resultUnknown('创建 Campaign', response);
       const id = result.success[0] && idFrom(result.success[0], 'campaignId');
       if (id) {
         journal.campaignId = id;
         journal.status = 'CAMPAIGN_CREATED';
         saveJournal(plan, journal);
       }
+      // 有成功项却取不到 campaignId:Campaign 可能已创建,重跑会重复创建 → 熔断
+      if (!id && result.success.length > 0) throw resultUnknown('创建 Campaign', response);
       if (result.error.length || result.success.length !== 1 || !id) {
         throw partialFailure('创建 Campaign', result.error, result.success.length, 1);
       }
@@ -566,13 +584,15 @@ export async function executeKeywordCampaignPlan(
         },
         extraHeaders: { Prefer: 'return=representation' },
       });
-      const result = responseGroup(response, 'adGroups');
+      const result = adsResponseGroup(response, 'adGroups');
+      if (!result.known) throw resultUnknown('创建广告组', response);
       const id = result.success[0] && idFrom(result.success[0], 'adGroupId');
       if (id) {
         journal.adGroupId = id;
         journal.status = 'ADGROUP_CREATED';
         saveJournal(plan, journal);
       }
+      if (!id && result.success.length > 0) throw resultUnknown('创建广告组', response);
       if (result.error.length || result.success.length !== 1 || !id) {
         throw partialFailure('创建广告组', result.error, result.success.length, 1);
       }
@@ -597,12 +617,15 @@ export async function executeKeywordCampaignPlan(
         },
         extraHeaders: { Prefer: 'return=representation' },
       });
-      const result = responseGroup(response, 'productAds');
+      const result = adsResponseGroup(response, 'productAds');
+      if (!result.known) throw resultUnknown('创建商品广告', response);
+      let registered = 0;
       for (const item of result.success) {
         const localIndex = Number(item['index']);
         const original = pendingProducts[localIndex];
         const id = idFrom(item, 'adId', 'productAdId');
         if (original && id) {
+          registered += 1;
           completedProducts.add(original.index);
           journal.adIds[String(original.index)] = id;
         }
@@ -610,6 +633,8 @@ export async function executeKeywordCampaignPlan(
       journal.completedProductIndexes = [...completedProducts].sort((a, b) => a - b);
       if (completedProducts.size) journal.status = 'PRODUCT_AD_CREATED';
       saveJournal(plan, journal);
+      // 成功项对不上下标或取不到 adId:商品广告已创建但无法登记,续跑会重复创建 → 熔断
+      if (registered !== result.success.length) throw resultUnknown('创建商品广告', response);
       if (result.error.length || completedProducts.size !== plan.products.length) {
         throw partialFailure('创建商品广告', result.error, completedProducts.size, plan.products.length);
       }
@@ -638,18 +663,23 @@ export async function executeKeywordCampaignPlan(
         },
         extraHeaders: { Prefer: 'return=representation' },
       });
-      const result = responseGroup(response, 'keywords');
+      const result = adsResponseGroup(response, 'keywords');
+      if (!result.known) throw resultUnknown('创建关键词', response);
+      let registered = 0;
       for (const item of result.success) {
         const localIndex = Number(item['index']);
         const original = pending[localIndex];
         const id = idFrom(item, 'keywordId');
         if (original && id) {
+          registered += 1;
           completed.add(original.index);
           journal.keywordIds[String(original.index)] = id;
         }
       }
       journal.completedKeywordIndexes = [...completed].sort((a, b) => a - b);
       saveJournal(plan, journal);
+      // 成功项对不上下标或取不到 keywordId:关键词已创建但无法登记,续跑会重复创建 → 熔断
+      if (registered !== result.success.length) throw resultUnknown('创建关键词', response);
       if (result.error.length || journal.completedKeywordIndexes.length < Math.min(start + 100, plan.keywords.length)) {
         throw partialFailure('创建关键词', result.error, journal.completedKeywordIndexes.length, plan.keywords.length);
       }
@@ -665,7 +695,8 @@ export async function executeKeywordCampaignPlan(
     if (plan.enableAfterCreate) {
       progress('· [6/6] 全部验证成功，启用 Campaign...');
       const enableResponse = await setCampaignState(client, plan.profileId, journal.campaignId!, 'ENABLED', plan.region);
-      const enableResult = responseGroup(enableResponse, 'campaigns');
+      // 启用是幂等 PUT,不会重复创建对象:结构不识别按 partialFailure 处理即可,续跑会先回读再重试启用。
+      const enableResult = adsResponseGroup(enableResponse, 'campaigns');
       if (enableResult.error.length || enableResult.success.length !== 1) {
         throw partialFailure('启用 Campaign', enableResult.error, enableResult.success.length, 1);
       }

@@ -13,7 +13,7 @@
 
 import { AmzError } from '../../internal/errs/errors.js';
 import type { ToolDefinition } from '../../tools/types.js';
-import { daysAgoIso, resolveMarketplace, strFlag } from '../common.js';
+import { daysAgoIso, isIso8601, resolveMarketplace, strFlag } from '../common.js';
 import { sanitizeOrder } from './sanitize.js';
 
 const ORDER_STATUSES = [
@@ -53,6 +53,34 @@ export const ordersList: ToolDefinition = {
     { name: 'next-token', desc: '分页游标(上一页返回的 nextToken)' },
   ],
   validate: (flags) => {
+    // --created-after 与 --updated-after 互斥:同给时不能静默取其一(结果口径完全不同)
+    const createdAfter = strFlag(flags, 'createdAfter');
+    const updatedAfter = strFlag(flags, 'updatedAfter');
+    if (createdAfter && updatedAfter) {
+      throw new AmzError({
+        type: 'invalid_param',
+        subtype: 'conflicting_time_filter',
+        param: '--created-after/--updated-after',
+        hintAgent: 'fix_param',
+        hintHuman: '--created-after 和 --updated-after 不能同时使用(按创建时间还是更新时间过滤,口径不同),请二选一。',
+        message: '--created-after and --updated-after are mutually exclusive',
+      });
+    }
+    for (const [value, flagName, subtype] of [
+      [createdAfter, '--created-after', 'invalid_created_after'],
+      [updatedAfter, '--updated-after', 'invalid_updated_after'],
+    ] as const) {
+      if (value && !isIso8601(value)) {
+        throw new AmzError({
+          type: 'invalid_param',
+          subtype,
+          param: flagName,
+          hintAgent: 'fix_param',
+          hintHuman: `${flagName} 必须是合法的 ISO 8601 时间,如 2026-07-01T00:00:00Z。`,
+          message: `invalid ${flagName}: ${value}`,
+        });
+      }
+    }
     const status = strFlag(flags, 'status');
     if (status) {
       for (const s of status.split(',').map((x) => x.trim())) {

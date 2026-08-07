@@ -2,6 +2,7 @@
 
 import { gunzipSync } from 'node:zlib';
 import { AmzError } from '../internal/errs/errors.js';
+import { amazonFetch, type EgressChannel } from '../internal/net/egress.js';
 import {
   MARKETPLACES,
   marketplaceByCountry,
@@ -123,7 +124,7 @@ export function validateIsoTimeRange(
   }
 }
 
-function isIso8601(value: string): boolean {
+export function isIso8601(value: string): boolean {
   if (
     !/^\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2}))?$/.test(value) ||
     !Number.isFinite(Date.parse(value))
@@ -139,6 +140,75 @@ function isIso8601(value: string): boolean {
   );
 }
 
+/** 判断是否纯日期(YYYY-MM-DD,无时间部分)。 */
+export function isDateOnly(value: string): boolean {
+  return /^\d{4}-\d{2}-\d{2}$/.test(value);
+}
+
+/** 校验 IANA 时区名(如 America/Los_Angeles / UTC);非法抛类型化 invalid_param。 */
+export function validateTimeZoneFlag(flags: Record<string, unknown>, key = 'timezone'): void {
+  const tz = strFlag(flags, key);
+  if (!tz) return;
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: tz });
+  } catch {
+    throw new AmzError({
+      type: 'invalid_param',
+      subtype: 'invalid_timezone',
+      param: '--timezone',
+      hintAgent: 'fix_param',
+      hintHuman: `不认识的时区 "${tz}"。请用 IANA 时区名,如 America/Los_Angeles、Asia/Shanghai、UTC。`,
+      message: `invalid IANA time zone: ${tz}`,
+    });
+  }
+}
+
+/** 取某 UTC 时刻在指定时区的偏移(±HH:MM 形式)。 */
+function utcOffsetAt(instantMs: number, timeZone: string): string {
+  const parts = new Intl.DateTimeFormat('en-US', { timeZone, timeZoneName: 'longOffset' }).formatToParts(instantMs);
+  const name = parts.find((p) => p.type === 'timeZoneName')?.value ?? 'GMT';
+  // 形如 "GMT-07:00" / "GMT+05:30" / "GMT"(=UTC)
+  const m = /GMT([+-]\d{1,2})(?::(\d{2}))?/.exec(name);
+  if (!m) return '+00:00';
+  const sign = m[1]!.startsWith('-') ? '-' : '+';
+  const hh = String(Math.abs(Number(m[1]))).padStart(2, '0');
+  return `${sign}${hh}:${m[2] ?? '00'}`;
+}
+
+/**
+ * 把纯日期(YYYY-MM-DD)补全成带时区偏移的完整 ISO 时间戳:
+ * 起始=当日 00:00:00,截止=当日 23:59:59,偏移按 timeZone(默认 UTC)计算。
+ * 非纯日期的输入原样返回(已是完整时间戳,不动)。
+ * 背景:部分接口(如 Sales getOrderMetrics)要求完整 ISO 时间,纯日期会被 API 拒;
+ * 本地补全比报错更友好,且能按用户选定时区切日。
+ */
+export function expandDateOnlyIso(value: string, endOfDay: boolean, timeZone = 'UTC'): string {
+  if (!isDateOnly(value)) return value;
+  const time = endOfDay ? '23:59:59' : '00:00:00';
+  if (timeZone === 'UTC') return `${value}T${time}Z`;
+  // 两步逼近:先按 UTC 同刻猜偏移,再用猜出的本地时刻重取一次(覆盖夏令时切换日)
+  const guess = utcOffsetAt(Date.parse(`${value}T${time}Z`), timeZone);
+  const offset = utcOffsetAt(Date.parse(`${value}T${time}${guess}`), timeZone);
+  return `${value}T${time}${offset}`;
+}
+
+/** 自动翻页命令的页数熔断上限(防上游 nextToken 异常导致的无限翻页)。 */
+export const MAX_AUTO_PAGES = 100;
+
+/** 翻页熔断:页数超过 MAX_AUTO_PAGES 抛类型化上游错误(调用方传各自的 subtype 与描述)。 */
+export function assertPageWithinLimit(page: number, subtype: string, what: string): void {
+  if (page <= MAX_AUTO_PAGES) return;
+  throw new AmzError({
+    type: 'upstream_error',
+    subtype,
+    hintAgent: 'report_to_human',
+    hintHuman:
+      `${what}翻页超过 ${MAX_AUTO_PAGES} 页仍未结束,已熔断中止(疑似接口分页异常或数据量异常)。` +
+      '请稍后重试;若反复出现请联系管理员。',
+    message: `pagination exceeded ${MAX_AUTO_PAGES} pages while fetching ${what}`,
+  });
+}
+
 /**
  * 下载亚马逊签发的文档(预签名 URL,故意不走带认证头的 client),
  * 校验 HTTP 状态并按需 GZIP 解压,返回原始 Buffer。
@@ -146,9 +216,11 @@ function isIso8601(value: string): boolean {
  */
 export async function fetchDocumentBuffer(
   url: string,
-  opts: { gzip?: boolean; what: string; subtype: string },
+  opts: { gzip?: boolean; what: string; subtype: string; channel?: EgressChannel },
 ): Promise<Buffer> {
-  const resp = await fetch(url, { signal: AbortSignal.timeout(120_000) });
+  // 预签名地址虽然不带认证头,但主机同样是亚马逊侧的(amazonaws.com),
+  // 所以也要按账号配置的代理发出,与其他请求保持一致的出口。
+  const resp = await amazonFetch(url, { signal: AbortSignal.timeout(120_000) }, opts.channel ?? 'sp');
   if (!resp.ok) {
     throw new AmzError({
       type: 'upstream_error',

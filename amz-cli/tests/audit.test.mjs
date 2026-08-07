@@ -37,7 +37,7 @@ test('buildAuditLine 记录关键字段(含 node),不含 PII', () => {
 });
 
 test('sanitizeAccountForPath 清理非法字符', () => {
-  assert.equal(sanitizeAccountForPath('Animal Abode'), 'Animal_Abode');
+  assert.equal(sanitizeAccountForPath('Proxy Shop'), 'Proxy_Shop');
   assert.equal(sanitizeAccountForPath('../etc'), '.._etc');
   assert.equal(sanitizeAccountForPath(''), 'default');
 });
@@ -86,4 +86,39 @@ test('AMZ_AUDIT_DISABLE=1 时不写本地日志', () => {
 test('flushAuditUploads 未配 AMZ_AUDIT_HTTP 时安全返回(不抛)', async () => {
   delete process.env.AMZ_AUDIT_HTTP;
   await flushAuditUploads(); // 不应抛错
+});
+
+test('flushAuditUploads 把缓冲行 POST 到中央并清空缓冲(含 MCP 操作名)', async () => {
+  process.env.AMZ_AUDIT_DISABLE = '1'; // 本测试只看上报,不落盘
+  process.env.AMZ_AUDIT_HTTP = 'https://audit.example.test/ingest';
+  process.env.AMZ_AUDIT_TOKEN = 'fake-audit-token';
+  process.env.AMZ_AUDIT_NODE = 'test-node';
+  const originalFetch = globalThis.fetch;
+  const posts = [];
+  globalThis.fetch = async (url, init) => {
+    posts.push({ url: String(url), init });
+    return new Response('ok');
+  };
+  try {
+    setAuditAccount('shop-x');
+    setAuditOperation('mcp apply_listing_update');
+    auditLog({ api: 'sp', method: 'PATCH', path: '/listings/2021-08-01/items', status: 200, ok: true });
+    await flushAuditUploads();
+    assert.equal(posts.length, 1);
+    assert.equal(posts[0].url, 'https://audit.example.test/ingest');
+    assert.equal(posts[0].init.headers.Authorization, 'Bearer fake-audit-token');
+    const last = JSON.parse(posts[0].init.body.split('\n').at(-1));
+    assert.equal(last.account, 'shop-x');
+    assert.equal(last.op, 'mcp apply_listing_update');
+    assert.equal(last.path, '/listings/2021-08-01/items');
+    // 缓冲已清空:再 flush 一次不重复上报
+    await flushAuditUploads();
+    assert.equal(posts.length, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+    delete process.env.AMZ_AUDIT_HTTP;
+    delete process.env.AMZ_AUDIT_TOKEN;
+    delete process.env.AMZ_AUDIT_DISABLE;
+    delete process.env.AMZ_AUDIT_NODE;
+  }
 });

@@ -20,7 +20,7 @@ import { mapBatchResults, type BatchResponse } from './batch.js';
 const COMPETITIVE_URI = '/products/pricing/2022-05-01/items/competitiveSummary';
 const BATCH_MAX = 20;
 
-export type BuyBoxStatus = 'won' | 'lost' | 'no-featured-offer' | 'error';
+export type BuyBoxStatus = 'won' | 'lost' | 'undetermined' | 'no-featured-offer' | 'error';
 
 export interface BuyBoxRow {
   asin: string;
@@ -47,7 +47,8 @@ function asArray(v: unknown): Array<Record<string, unknown>> {
 
 /**
  * 纯函数:从单个 ASIN 的 competitiveSummary body 判定 Buy Box 归属。
- * 只认 buyingOptionType==='New' 的 featured 报价;比对 mySellerId 判 won/lost。
+ * 只认 buyingOptionType==='New' 的 featured 报价;比对 mySellerId 判 won/lost;
+ * 响应未暴露 sellerId 时判 undetermined(无法判定归属,不能当 lost)。
  * 结构对字段名容错(price 支持 listingPrice.amount / price.amount)。
  */
 export function extractBuyBox(
@@ -90,10 +91,12 @@ export function extractBuyBox(
   // 若能认出自己中标,用自己的价作 Buy Box 价更准
   if (myPrice !== undefined) buyBoxPrice = myPrice;
 
+  // 响应未暴露 sellerId 时无法判定归属 → undetermined,不能硬标 lost
+  // (误标 lost 可能触发下游错误降价;undetermined 需要人工/其他渠道再确认)
   return {
-    status: !sawSellerId ? 'lost' : iWin ? 'won' : 'lost',
+    status: !sawSellerId ? 'undetermined' : iWin ? 'won' : 'lost',
     hasFeaturedOffer: true,
-    iWin: sawSellerId ? iWin : null, // 响应未暴露 sellerId 时无法判定归属
+    iWin: sawSellerId ? iWin : null,
     ...(buyBoxPrice !== undefined ? { buyBoxPrice } : {}),
     ...(currency ? { currency } : {}),
   };
@@ -106,7 +109,8 @@ export function summarizeBuyBox(
 ): BuyBoxRow[] {
   return results.map((r) => {
     const asin = String(r['asin']);
-    if (r['httpStatus'] !== 200) {
+    // 非 200,或 200 但被标识核对判为错误行(mapBatchResults 的 mismatch)→ 都算 error
+    if (r['httpStatus'] !== 200 || r['error'] !== undefined) {
       return { asin, status: 'error', hasFeaturedOffer: false, iWin: null, error: r['error'] };
     }
     return { asin, ...extractBuyBox(r['summary'] as Record<string, unknown> | undefined, mySellerId) };
@@ -159,7 +163,8 @@ export const pricingBuybox: ToolDefinition = {
   command: 'buybox',
   description:
     '批量看自己的 listing 有没有拿到 Buy Box:按 ASIN 查 featured offer 并比对自己的 sellerId,' +
-    '标 won/lost/no-featured-offer,带 Buy Box 价格。一次最多 20/批,超过自动分批',
+    '标 won/lost/undetermined(响应未暴露 sellerId,无法判定归属)/no-featured-offer,带 Buy Box 价格。' +
+    '一次最多 20/批,超过自动分批',
   mutation: 'none',
   isAsync: true,
   roles: ['Pricing'],
@@ -168,7 +173,11 @@ export const pricingBuybox: ToolDefinition = {
     { name: 'asins', desc: '自己的 ASIN 列表,逗号分隔(与 --asin-file 二选一)' },
     { name: 'asin-file', desc: 'ASIN 文件,每行一个(与 --asins 二选一,适合大批量)' },
     { name: 'seller-id', desc: '自己的卖家编号(本地模式可省并读 SELLER_ID);判定 Buy Box 归属用' },
-    { name: 'lost-only', desc: '只返回丢失 Buy Box 的(lost / no-featured-offer)', type: 'boolean' },
+    {
+      name: 'lost-only',
+      desc: '只返回确认丢失 Buy Box 的(lost / no-featured-offer;不含 undetermined——归属未判定不能当丢失处理)',
+      type: 'boolean',
+    },
     { name: 'out', desc: '把完整结果写到该 JSON 文件,stdout 只回汇总' },
   ],
   validate: (flags) => {
@@ -207,12 +216,13 @@ export const pricingBuybox: ToolDefinition = {
     }
 
     const shown = lostOnly ? rows.filter((r) => r.status === 'lost' || r.status === 'no-featured-offer') : rows;
+    // 各状态互斥:won + lost + undetermined + noFeaturedOffer + errors === total
     const counts = {
       total: rows.length,
       won: rows.filter((r) => r.status === 'won').length,
       lost: rows.filter((r) => r.status === 'lost').length,
+      undetermined: rows.filter((r) => r.status === 'undetermined').length,
       noFeaturedOffer: rows.filter((r) => r.status === 'no-featured-offer').length,
-      undetermined: rows.filter((r) => r.iWin === null && r.status !== 'error' && r.status !== 'no-featured-offer').length,
       errors: rows.filter((r) => r.status === 'error').length,
     };
     const base = { marketplace: mkt.country, counts };

@@ -11,6 +11,7 @@ import Bottleneck from 'bottleneck';
 import { AmzError } from '../errs/errors.js';
 import { auditLog } from '../audit.js';
 import { spApiUserAgent } from '../user-agent.js';
+import { amazonFetch, type EgressResponse } from '../net/egress.js';
 import { progress } from '../errs/output.js';
 import type { CredentialProvider } from '../credential/provider.js';
 import type { Region } from './regions.js';
@@ -46,7 +47,7 @@ export class SpApiClient {
     const replaySafe =
       method.toUpperCase() === 'GET' || method.toUpperCase() === 'HEAD' || opts.retry5xx === true;
     for (let attempt = 0; ; attempt++) {
-      let resp: Response;
+      let resp: EgressResponse;
       try {
         resp = await limiter.schedule(() => this.doFetch(method, path, opts, replaySafe));
       } catch (err) {
@@ -59,9 +60,46 @@ export class SpApiClient {
 
       // 成功
       if (resp.ok) {
+        if (resp.status === 204) {
+          auditLog({ api: 'sp', method, path, region: opts.region, status: resp.status, ok: true });
+          return null;
+        }
+        // 2xx 状态行已收到,但响应体可能还在路上:读 body 时超时/连接中断对写请求
+        // 同样意味着"结果未知,不得重试"。成功审计必须等 body 读完才记,否则会留下
+        // ok:true 却实际抛错的矛盾底账。
+        let text: string;
+        try {
+          text = await resp.text();
+        } catch (err) {
+          const classified = !replaySafe
+            ? new AmzError({
+                type: 'upstream_error',
+                subtype: 'sp_api.write_result_unknown',
+                hintAgent: 'report_to_human',
+                hintHuman:
+                  `Amazon 已对 ${method.toUpperCase()} 写请求返回 HTTP ${resp.status}，但读取响应内容时网络中断。` +
+                  '写入结果可能已经生效；不要重试，请先用只读查询或 Seller Central 核对。',
+                message: `${method.toUpperCase()} ${path} returned HTTP ${resp.status} but reading the body failed; write result is ambiguous: ${err instanceof Error ? err.message : String(err)}`,
+                status: resp.status,
+                cause: err,
+              })
+            : new AmzError({
+                type: 'upstream_error',
+                subtype: 'sp_api.network_error',
+                hintAgent: 'backoff_and_retry',
+                hintHuman: '读取亚马逊响应时网络中断,请稍后重试。',
+                message: `reading response body of ${path} failed after HTTP ${resp.status}: ${err instanceof Error ? err.message : String(err)}`,
+                status: resp.status,
+                retryable: true,
+                cause: err,
+              });
+          auditLog({
+            api: 'sp', method, path, region: opts.region, status: resp.status, ok: false,
+            errorSubtype: classified.subtype,
+          });
+          throw classified;
+        }
         auditLog({ api: 'sp', method, path, region: opts.region, status: resp.status, ok: true });
-        if (resp.status === 204) return null;
-        const text = await resp.text();
         if (text.trim() === '') return null;
         try {
           return JSON.parse(text) as unknown;
@@ -98,9 +136,11 @@ export class SpApiClient {
         resp.status >= 500 &&
         replaySafe;
       if ((resp.status === 429 || retryable5xx) && attempt < MAX_RETRIES) {
+        // retry-after 来自上游,不能无条件照办:返回 3600 会让命令静默睡 1 小时,
+        // 用户只会看到"卡住"。cap 到 60 秒,超过就按 60 秒等。
         const retryAfterHeader = Number(resp.headers.get('retry-after'));
         const backoffMs = Number.isFinite(retryAfterHeader) && retryAfterHeader > 0
-          ? retryAfterHeader * 1000
+          ? Math.min(retryAfterHeader * 1000, 60_000)
           : Math.min(2 ** attempt * 1000 + Math.random() * 500, 30_000);
         progress(
           `· 亚马逊返回 ${resp.status},${Math.round(backoffMs / 1000)}s 后自动重试(第 ${attempt + 1}/${MAX_RETRIES} 次)...`,
@@ -123,7 +163,7 @@ export class SpApiClient {
     path: string,
     opts: RequestOptions,
     replaySafe: boolean,
-  ): Promise<Response> {
+  ): Promise<EgressResponse> {
     const creds = await this.credentials.getCredentials(opts.region);
     const url = new URL(path, creds.endpoint);
     if (opts.query) {
@@ -133,7 +173,7 @@ export class SpApiClient {
     }
     const headers: Record<string, string> = {
       'x-amz-access-token': creds.accessToken,
-      // 按主体可配的 User-Agent,避免多主体共用同一应用层指纹(见 user-agent.ts)
+      // 按账号可配的 User-Agent,填各自应用注册的名字与版本(见 user-agent.ts)
       'User-Agent': spApiUserAgent(),
     };
     let body: string | undefined;
@@ -141,7 +181,15 @@ export class SpApiClient {
       headers['Content-Type'] = 'application/json';
       body = JSON.stringify(opts.body);
     }
-    return fetch(url, { method, headers, body, signal: AbortSignal.timeout(60_000) }).catch((err: unknown) => {
+    // 按账号配置的代理发出(未配置 SP_API_PROXY 时等同于直连,见 net/egress.ts)
+    return amazonFetch(
+      url,
+      { method, headers, body, signal: AbortSignal.timeout(60_000) },
+      'sp',
+    ).catch((err: unknown) => {
+      // 代理配置错误(URL 非法/协议不支持)在发出任何字节之前就抛出,是 AmzError。
+      // 必须原样上抛:包装成 write_result_unknown 会误导用户去核对一次根本没发出的写入。
+      if (err instanceof AmzError) throw err;
       if (!replaySafe) {
         throw new AmzError({
           type: 'upstream_error',

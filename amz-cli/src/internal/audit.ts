@@ -13,6 +13,7 @@
 import { appendFileSync, mkdirSync } from 'node:fs';
 import { homedir, hostname } from 'node:os';
 import { join } from 'node:path';
+import { egressLabel } from './net/egress.js';
 
 let currentAccount = 'default';
 let currentOperation = '';
@@ -64,18 +65,26 @@ export interface AuditRecord {
   errorSubtype?: string;
 }
 
-/** 组装一行审计记录的 JSON(纯函数,便于单测)。 */
+/**
+ * 组装一行审计记录的 JSON(纯函数,便于单测)。
+ *
+ * egress 是该账号的出口标签(EGRESS_LABEL),只记标签不记代理地址,更不含密码。
+ * 有了它,中央看板才能核对某个账号的请求是否都走了预期的出口,
+ * 而不是只能相信配置文件写对了。未配代理的账号没有这个字段。
+ */
 export function buildAuditLine(
   rec: AuditRecord,
   account: string,
   node: string,
   operation: string,
   isoTimestamp: string,
+  egress?: string,
 ): string {
   return JSON.stringify({
     ts: isoTimestamp,
     account,
     node,
+    ...(egress ? { egress } : {}),
     ...(operation ? { op: operation } : {}),
     api: rec.api,
     method: rec.method,
@@ -91,7 +100,14 @@ export function buildAuditLine(
 export function auditLog(rec: AuditRecord): void {
   let line: string;
   try {
-    line = buildAuditLine(rec, currentAccount, auditNode(), currentOperation, new Date().toISOString());
+    line = buildAuditLine(
+      rec,
+      currentAccount,
+      auditNode(),
+      currentOperation,
+      new Date().toISOString(),
+      egressLabel(),
+    );
   } catch {
     return;
   }
@@ -130,6 +146,9 @@ export async function flushAuditUploads(): Promise<void> {
   const body = uploadBuffer.join('\n'); // ndjson
   uploadBuffer.length = 0;
   try {
+    // 刻意用普通 fetch,不走 net/egress 的代理:这里打的是自建审计服务器,
+    // 不是亚马逊。走代理纯属绕远,还会把代理地址暴露给不需要知道的一方。
+    // 不要"顺手统一"成 amazonFetch。
     await fetch(url, {
       method: 'POST',
       headers: {

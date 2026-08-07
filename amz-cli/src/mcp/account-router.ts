@@ -12,6 +12,7 @@ import {
   type ListToolsResult,
   type Tool,
 } from '@modelcontextprotocol/sdk/types.js';
+import { readPackageInfo } from '../internal/package-info.js';
 
 export interface AccountToolClient {
   listTools(): Promise<ListToolsResult>;
@@ -77,7 +78,8 @@ export class MultiAccountMcpRouter {
   ) {
     if (accounts.length === 0) throw new Error('multi-account MCP router requires at least one account');
     this.server = new Server(
-      { name: 'amz-cli-safe-writes-multi-account', version: options.version ?? '0.2.6' },
+      // 版本从随包 package.json 动态读取,避免与 npm 版本漂移;options.version 仍可覆盖
+      { name: 'amz-cli-safe-writes-multi-account', version: options.version ?? readPackageInfo().version },
       { capabilities: { tools: {} } },
     );
     this.server.setRequestHandler(ListToolsRequestSchema, async () => ({
@@ -89,7 +91,7 @@ export class MultiAccountMcpRouter {
         throw new McpError(ErrorCode.InvalidParams, '工具调用缺少参数对象，必须明确提供 account');
       }
       const account = rawArgs['account'];
-      // 账号名大小写不敏感:把请求值归一到配置里的规范名(如 cycayit → Cycayit),
+      // 账号名大小写不敏感:把请求值归一到配置里的规范名(如 shopa → ShopA),
       // 再按规范名路由到隔离子进程,子进程返回的也是规范名。
       const canonical =
         typeof account === 'string'
@@ -109,10 +111,17 @@ export class MultiAccountMcpRouter {
         name: request.params.name,
         arguments: childArgs,
       });
-      if (!result.isError && result.structuredContent?.['account'] !== canonical) {
+      // 回验也必须大小写不敏感:子进程的 loadAccount 会把账号名归一到凭证文件的
+      // 实际大小写(shopa → ShopA.env 返回 "ShopA"),与 --accounts 里的写法
+      // 可能只差大小写。严格比较会把每次成功调用都误判成路由失败。
+      const returned = result.structuredContent?.['account'];
+      if (
+        !result.isError &&
+        (typeof returned !== 'string' || returned.toLowerCase() !== canonical.toLowerCase())
+      ) {
         throw new McpError(
           ErrorCode.InternalError,
-          `店铺路由校验失败:请求 ${canonical},子进程返回 ${String(result.structuredContent?.['account'])}`,
+          `店铺路由校验失败:请求 ${canonical},子进程返回 ${String(returned)}`,
         );
       }
       return result;
@@ -194,7 +203,7 @@ export function createStdioAccountConnector(options: {
     });
     const client = new Client({
       name: `amz-cli-account-router-${account}`,
-      version: options.version ?? '0.2.6',
+      version: options.version ?? readPackageInfo().version,
     });
     await client.connect(transport);
     return {

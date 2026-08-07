@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import {
   selectRestockCandidates,
   parseUnitsByAsin,
+  restockCandidates,
 } from '../dist/shortcuts/inventory/restock-candidates.js';
 
 const inventory = [
@@ -112,4 +113,24 @@ test('parseUnitsByAsin 容错空/坏输入', () => {
   assert.deepEqual(parseUnitsByAsin('not json'), {});
   assert.deepEqual(parseUnitsByAsin('{}'), {});
   assert.deepEqual(parseUnitsByAsin(JSON.stringify({ salesAndTrafficByAsin: 'x' })), {});
+});
+
+test('库存翻页超过 100 页熔断,抛类型化上游错误(防 nextToken 异常无限翻页)', async () => {
+  const ctx = {
+    flags: { marketplace: 'US' },
+    progress() {},
+    client: {
+      // 永远返回 nextToken,模拟上游分页异常
+      async get() {
+        return {
+          payload: { inventorySummaries: [] },
+          pagination: { nextToken: 'ALWAYS-MORE' },
+        };
+      },
+    },
+  };
+  await assert.rejects(
+    () => restockCandidates.execute(ctx),
+    (e) => e?.subtype === 'inventory.pagination_overflow' && e?.type === 'upstream_error',
+  );
 });

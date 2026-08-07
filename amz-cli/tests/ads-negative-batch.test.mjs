@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { AmzError } from '../dist/internal/errs/errors.js';
 import {
+  adsNegativeBatch,
   parseNegativeChanges,
   buildNegativeKeywordsBody,
   MAX_NEGATIVE_BATCH,
@@ -58,4 +60,54 @@ test('buildNegativeKeywordsBody 组装提交体(state=ENABLED)', () => {
       { campaignId: '1', adGroupId: '2', keywordText: 'dog', matchType: 'NEGATIVE_EXACT', state: 'ENABLED' },
     ],
   });
+});
+
+function executeCtx(respond) {
+  return {
+    flags: {
+      profileId: '123',
+      changes: JSON.stringify([{ campaignId: '1', adGroupId: '2', text: 'bad term' }]),
+    },
+    progress() {},
+    adsClient: { request: respond },
+  };
+}
+
+test('execute:网络中断(write_result_unknown)计入结果不明,提示不要重跑以免重复否定词', async () => {
+  const ctx = executeCtx(async () => {
+    throw new AmzError({
+      type: 'upstream_error',
+      subtype: 'ads.write_result_unknown',
+      hintAgent: 'report_to_human',
+      hintHuman: 'unknown',
+      message: 'socket hang up after dispatch',
+    });
+  });
+  const result = await adsNegativeBatch.execute(ctx);
+  assert.equal(result.failedCount, 0);
+  assert.equal(result.resultUnknownCount, 1);
+  assert.equal(result.resultUnknownChunks.length, 1);
+  assert.equal(result.failedChunks, undefined);
+  assert.match(result.note, /不要直接重跑/);
+  assert.match(result.note, /重复否定词/);
+});
+
+test('execute:响应结构未识别同样计入结果不明(unknownResponseCount)', async () => {
+  const result = await adsNegativeBatch.execute(executeCtx(async () => ({})));
+  assert.equal(result.failedCount, 0);
+  assert.equal(result.resultUnknownCount, 1);
+  assert.equal(result.unknownResponseCount, 1);
+  assert.match(result.note, /不要直接重跑/);
+});
+
+test('execute:确定性错误仍计入 failedChunks,不进结果不明', async () => {
+  const result = await adsNegativeBatch.execute(
+    executeCtx(async () => {
+      throw new Error('403 Forbidden');
+    }),
+  );
+  assert.equal(result.failedCount, 1);
+  assert.equal(result.resultUnknownCount, 0);
+  assert.match(result.failedChunks[0].reason, /403/);
+  assert.match(result.note, /不要自动重试/);
 });

@@ -132,6 +132,33 @@ test('combined MCP rejects missing/unknown accounts, but routes case-insensitive
   }
 });
 
+test('子进程返回凭证文件的实际大小写时,路由回验不误报失败', async () => {
+  // 真实场景:--accounts 配 cycshop,凭证文件是 CycShop.env,子进程 loadAccount
+  // 归一后返回 "CycShop"。回验若做严格比较,每次成功调用都会被误判成路由失败。
+  stateDir = mkdtempSync(join(tmpdir(), 'amz-mcp-router-state-'));
+  process.env.AMZ_CLI_STATE_DIR = stateDir;
+  const baseConnector = inMemoryConnector();
+  const router = new MultiAccountMcpRouter(['cycshop'], {
+    // 模拟子进程按文件实际大小写归一账号名
+    connector: (account) => baseConnector(account === 'cycshop' ? 'CycShop' : account),
+    version: '1.0.0-test',
+  });
+  const client = new Client({ name: 'router-test-client', version: '1.0.0' });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await Promise.all([router.connect(serverTransport), client.connect(clientTransport)]);
+  try {
+    const prepared = await client.callTool({
+      name: 'prepare_keyword_campaign',
+      arguments: { account: 'cycshop', plan: plan('case-canonical') },
+    });
+    assert.equal(prepared.isError, undefined, '大小写只差归一竟被判成路由失败');
+    assert.equal(prepared.structuredContent.account, 'CycShop');
+  } finally {
+    await client.close();
+    await router.close();
+  }
+});
+
 test('preview token prepared for one account cannot be applied through another account', async () => {
   let adsClientCreated = false;
   const { client, router } = await connected(['shop-b', 'shop-d'], () => ({

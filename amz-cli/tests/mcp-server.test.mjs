@@ -1,11 +1,15 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, test } from 'node:test';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
+import { auditLog, setAuditOperation } from '../dist/internal/audit.js';
+import { MultiAccountMcpRouter } from '../dist/mcp/account-router.js';
 import { createAmazonMcpServer, extractAccountsArg } from '../dist/mcp-server.js';
+
+const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
 
 let stateDir;
 
@@ -216,6 +220,99 @@ test('MCP token is bound to the exact reviewed plan', async () => {
   } finally {
     await client.close();
     await server.close();
+  }
+});
+
+test('MCP 服务版本与 package.json 一致,不再硬编码漂移', async () => {
+  const { client, server } = await connected(() => {
+    throw new Error('must not create AdsClient');
+  });
+  try {
+    assert.equal(client.getServerVersion().version, pkg.version);
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
+
+test('多店路由 MCP 版本取自 package.json,options.version 仍可覆盖', async () => {
+  const connector = async () => {
+    throw new Error('initialize 阶段不应连接账号子进程');
+  };
+  const router = new MultiAccountMcpRouter(['shop-a'], { connector });
+  const client = new Client({ name: 'test-client', version: '1.0.0' });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await Promise.all([router.connect(serverTransport), client.connect(clientTransport)]);
+  try {
+    assert.equal(client.getServerVersion().version, pkg.version);
+  } finally {
+    await client.close();
+    await router.close();
+  }
+
+  const overridden = new MultiAccountMcpRouter(['shop-a'], { connector, version: '9.9.9' });
+  const client2 = new Client({ name: 'test-client', version: '1.0.0' });
+  const [ct2, st2] = InMemoryTransport.createLinkedPair();
+  await Promise.all([overridden.connect(st2), client2.connect(ct2)]);
+  try {
+    assert.equal(client2.getServerVersion().version, '9.9.9');
+  } finally {
+    await client2.close();
+    await overridden.close();
+  }
+});
+
+test('MCP 工具调用会把操作名标进审计(op 不再恒为空)', async () => {
+  const auditDir = mkdtempSync(join(tmpdir(), 'amz-mcp-audit-'));
+  process.env.AMZ_AUDIT_DIR = auditDir;
+  delete process.env.AMZ_AUDIT_HTTP;
+  setAuditOperation('');
+  const { client, server } = await connected(() => {
+    throw new Error('preview must not create AdsClient');
+  });
+  try {
+    const prepared = await client.callTool({ name: 'prepare_keyword_campaign', arguments: { plan: plan() } });
+    assert.equal(prepared.isError, undefined);
+    // 工具入口已把当前操作名设为 "mcp <工具名>";此后本进程发出的审计行都带上它
+    auditLog({ api: 'ads', method: 'POST', path: '/sp/campaigns', status: 200, ok: true });
+    const month = new Date().toISOString().slice(0, 7);
+    const lines = readFileSync(join(auditDir, 'default', `${month}.log`), 'utf8').trim().split('\n');
+    assert.equal(JSON.parse(lines.at(-1)).op, 'mcp prepare_keyword_campaign');
+  } finally {
+    await client.close();
+    await server.close();
+    delete process.env.AMZ_AUDIT_DIR;
+    rmSync(auditDir, { recursive: true, force: true });
+  }
+});
+
+test('MCP 连接关闭时把尾部审计行上报中央(长驻进程不再永不上报)', async () => {
+  process.env.AMZ_AUDIT_DISABLE = '1'; // 只看上报,不落盘
+  process.env.AMZ_AUDIT_HTTP = 'https://audit.example.test/ingest';
+  const originalFetch = globalThis.fetch;
+  const posts = [];
+  globalThis.fetch = async (url, init) => {
+    posts.push({ url: String(url), body: init?.body });
+    return new Response('ok');
+  };
+  const { client, server } = await connected(() => {
+    throw new Error('must not create AdsClient');
+  });
+  try {
+    // 模拟长驻期间攒下、但没到批量阈值的尾部审计行
+    auditLog({ api: 'sp', method: 'GET', path: '/orders/v0/orders', status: 200, ok: true });
+    await client.close();
+    await server.close();
+    // onclose 里的上报是异步旁路,轮询等它落地
+    for (let i = 0; i < 100 && posts.length === 0; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    assert.ok(posts.length >= 1, '连接关闭后没有触发审计上报');
+    assert.match(posts.map((p) => p.body).join('\n'), /\/orders\/v0\/orders/);
+  } finally {
+    globalThis.fetch = originalFetch;
+    delete process.env.AMZ_AUDIT_HTTP;
+    delete process.env.AMZ_AUDIT_DISABLE;
   }
 });
 

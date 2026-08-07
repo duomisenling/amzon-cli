@@ -15,6 +15,7 @@ import { AmzError } from '../../internal/errs/errors.js';
 import type { Region } from '../../internal/client/regions.js';
 import type { ToolContext, ToolDefinition } from '../../tools/types.js';
 import {
+  assertPageWithinLimit,
   daysAgoIso,
   resolveMarketplace,
   strFlag,
@@ -23,6 +24,7 @@ import {
 import {
   downloadReportDocument,
   requestReport,
+  requireReportDocumentId,
   waitForReport,
 } from '../report/infra.js';
 
@@ -124,6 +126,8 @@ async function fetchAllInventory(
   let page = 0;
   do {
     page += 1;
+    // 翻页熔断:防上游 nextToken 异常导致无限翻页
+    assertPageWithinLimit(page, 'inventory.pagination_overflow', 'FBA 实时库存');
     ctx.progress(`· 正在拉取 FBA 实时库存(第 ${page} 页)...`);
     const resp = (await ctx.client.get(
       '/fba/inventory/v1/summaries',
@@ -210,7 +214,7 @@ export const restockCandidates: ToolDefinition = {
         reportOptions: { asinGranularity: 'CHILD' },
       });
       const status = await waitForReport(ctx, reportId, timeout, mkt.region);
-      const text = await downloadReportDocument(ctx, status.reportDocumentId!, mkt.region);
+      const text = await downloadReportDocument(ctx, requireReportDocumentId(status), mkt.region);
       unitsByAsin = parseUnitsByAsin(text);
     } catch (error) {
       // 时间段内没有任何销量时 Amazon 会 CANCELLED——不是故障,当作"期间无销量"处理。

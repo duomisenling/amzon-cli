@@ -15,12 +15,14 @@
     "amz-cli-mcp": "dist/mcp-server.js"
   },
   "scripts": {
-    "build": "tsc",
+    "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
+    "build": "npm run clean && tsc",
     "dev": "tsx src/cli.ts",
-    "test": "npm run build && node --test tests/write-gate.test.mjs tests/broker.test.mjs tests/broker-server.test.mjs tests/preview-token.test.mjs tests/validation.test.mjs tests/retry-policy.test.mjs tests/report-sanitize.test.mjs tests/ads-pagination.test.mjs tests/ads-write.test.mjs tests/keyword-campaign-launch.test.mjs tests/campaign-extend.test.mjs tests/mcp-server.test.mjs tests/mcp-operational-writes.test.mjs tests/mcp-account-router.test.mjs tests/account.test.mjs tests/setup.test.mjs tests/listing-update.test.mjs tests/listing-schema.test.mjs tests/listing-mine.test.mjs tests/listing-create.test.mjs tests/inventory-restock-candidates.test.mjs tests/tier1-aggregations.test.mjs tests/tier15-aggregations.test.mjs tests/inventory-slow-moving.test.mjs tests/aplus-coverage.test.mjs tests/ads-coverage.test.mjs tests/ads-performance.test.mjs tests/ads-bid-batch.test.mjs tests/ads-negative-batch.test.mjs tests/ads-state-batch.test.mjs tests/ads-budget-batch.test.mjs tests/catalog-batch.test.mjs tests/listings-batch.test.mjs tests/listing-issues.test.mjs tests/pricing-buybox.test.mjs tests/audit.test.mjs tests/user-agent.test.mjs",
+    "test": "npm run build && node --test tests/write-gate.test.mjs tests/broker.test.mjs tests/broker-server.test.mjs tests/preview-token.test.mjs tests/validation.test.mjs tests/retry-policy.test.mjs tests/report-sanitize.test.mjs tests/ads-pagination.test.mjs tests/ads-write.test.mjs tests/keyword-campaign-launch.test.mjs tests/campaign-extend.test.mjs tests/mcp-server.test.mjs tests/mcp-operational-writes.test.mjs tests/mcp-account-router.test.mjs tests/account.test.mjs tests/setup.test.mjs tests/listing-update.test.mjs tests/listing-schema.test.mjs tests/listing-mine.test.mjs tests/listing-create.test.mjs tests/inventory-restock-candidates.test.mjs tests/tier1-aggregations.test.mjs tests/tier15-aggregations.test.mjs tests/inventory-slow-moving.test.mjs tests/aplus-coverage.test.mjs tests/ads-coverage.test.mjs tests/ads-performance.test.mjs tests/ads-bid-batch.test.mjs tests/ads-negative-batch.test.mjs tests/ads-state-batch.test.mjs tests/ads-budget-batch.test.mjs tests/catalog-batch.test.mjs tests/listings-batch.test.mjs tests/listing-issues.test.mjs tests/pricing-buybox.test.mjs tests/audit.test.mjs tests/user-agent.test.mjs tests/egress.test.mjs tests/sales-stats.test.mjs tests/orders-list.test.mjs tests/feedback-monitor.test.mjs tests/feed-result.test.mjs tests/ads-wasted-spend.test.mjs tests/ads-report.test.mjs",
     "typecheck": "tsc --noEmit",
+    "check:publish": "node scripts/check-publish.mjs",
     "prepack": "npm run build",
-    "prepublishOnly": "npm test"
+    "prepublishOnly": "npm test && npm run check:publish"
   },
   "engines": {
     "node": ">=20"
@@ -42,6 +44,7 @@
     "@modelcontextprotocol/sdk": "^1.29.0",
     "bottleneck": "^2.19.5",
     "commander": "^12.1.0",
+    "undici": "^6.28.0",
     "zod": "^3.23.8"
   },
   "devDependencies": {

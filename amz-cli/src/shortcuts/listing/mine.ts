@@ -113,7 +113,23 @@ export async function resolveUniqueListingSku(
       pageSize: 20,
     },
     mkt.region,
-  )) as { items?: Array<Record<string, unknown>> };
+  )) as { numberOfResults?: number; items?: Array<Record<string, unknown>> };
+
+  // 写操作前置判定,宁严勿宽:该 ASIN 的 SKU 多于一页(pageSize 20)时不翻页硬找,
+  // 否则可能把"多匹配"误判成唯一后写错对象。直接要求用户改用 --sku 指定。
+  const returned = (response.items ?? []).length;
+  if (typeof response.numberOfResults === 'number' && response.numberOfResults > returned) {
+    throw new AmzError({
+      type: 'invalid_param',
+      subtype: 'listing.asin_too_many_skus',
+      param: '--asin',
+      hintAgent: 'report_to_human',
+      hintHuman:
+        `ASIN ${asin} 在当前店铺的 ${mkt.country} 站对应的 SKU 过多(共 ${response.numberOfResults} 条,超出一页),` +
+        '无法安全判定唯一 SKU。已停止写入;请直接用 --sku 指定要操作的 SKU。',
+      message: `ASIN ${asin} matched ${response.numberOfResults} listings (> page size ${returned}); cannot safely resolve a unique SKU`,
+    });
+  }
 
   const matchedSkus = [...new Set((response.items ?? []).flatMap((item) => {
     const summaries = Array.isArray(item['summaries'])

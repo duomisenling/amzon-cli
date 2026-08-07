@@ -15,6 +15,7 @@
 //    不要在任何会被记录/共享的环境里跑,输出不要发给任何人。
 
 import { AmzError } from '../../internal/errs/errors.js';
+import { amazonFetch } from '../../internal/net/egress.js';
 import type { ToolDefinition } from '../../tools/types.js';
 import { strFlag } from '../common.js';
 
@@ -123,18 +124,22 @@ export const adsAuthExchange: ToolDefinition = {
     }
 
     ctx.progress('· 正在用授权码换取令牌...');
-    const resp = await fetch(endpoint, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' },
-      body: new URLSearchParams({
-        grant_type: 'authorization_code',
-        code: strFlag(ctx.flags, 'code')!,
-        client_id: clientId,
-        client_secret: clientSecret,
-        redirect_uri: strFlag(ctx.flags, 'redirectUri') ?? DEFAULT_REDIRECT,
-      }),
-      signal: AbortSignal.timeout(60_000),
-    });
+    const resp = await amazonFetch(
+      endpoint,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' },
+        body: new URLSearchParams({
+          grant_type: 'authorization_code',
+          code: strFlag(ctx.flags, 'code')!,
+          client_id: clientId,
+          client_secret: clientSecret,
+          redirect_uri: strFlag(ctx.flags, 'redirectUri') ?? DEFAULT_REDIRECT,
+        }).toString(),
+        signal: AbortSignal.timeout(60_000),
+      },
+      'ads',
+    );
     const body = (await resp.json().catch(() => ({}))) as Record<string, unknown>;
     if (!resp.ok || typeof body.refresh_token !== 'string') {
       throw new AmzError({

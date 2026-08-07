@@ -148,3 +148,58 @@ test('an unchanged campaign state is rejected at preview time so no token can be
     (error) => error?.subtype === 'ads.no_change_needed',
   );
 });
+
+test('keyword-bid 写入前两位小数归一,回读同口径比较不再误报 mismatch', async () => {
+  let putBody;
+  const ctx = {
+    // 0.855 归一(round2)后为 0.86:写入与回读比较必须用同一个归一值
+    flags: { profileId: '123', keywordId: '8100', bid: '0.855' },
+    progress() {},
+    adsClient: {
+      async request(method, path, opts) {
+        if (method === 'PUT') {
+          putBody = opts.body;
+          return { keywords: { success: [{ keywordId: '8100' }], error: [] } };
+        }
+        return { keywords: [{ keywordId: '8100', bid: 0.86 }] };
+      },
+    },
+  };
+  const result = await adsKeywordBid.execute(ctx);
+  assert.equal(putBody.keywords[0].bid, 0.86);
+  assert.equal(result.verificationStatus, 'VERIFIED');
+});
+
+test('keyword-bid 预览:目标竞价归一后与当前相等 → 判 no-change,拒发令牌', async () => {
+  const ctx = {
+    flags: { profileId: '123', keywordId: '8100', bid: '0.855' },
+    progress() {},
+    // 目标 0.855 归一后 = 0.86,与当前值相同 → 应判 no-change
+    confirmationState: { keywordId: '8100', bid: 0.86, keywordText: 'kw', state: 'ENABLED' },
+    adsClient: {},
+  };
+  await assert.rejects(
+    () => adsKeywordBid.dryRun(ctx),
+    (error) => error?.subtype === 'ads.no_change_needed',
+  );
+});
+
+test('campaign-budget 写入前两位小数归一,回读同口径比较不再误报 mismatch', async () => {
+  let putBody;
+  const ctx = {
+    flags: { profileId: '123', campaignId: '9001', dailyBudget: '12.345' },
+    progress() {},
+    adsClient: {
+      async request(method, path, opts) {
+        if (method === 'PUT') {
+          putBody = opts.body;
+          return { campaigns: { success: [{ campaignId: '9001' }], error: [] } };
+        }
+        return { campaigns: [{ campaignId: '9001', name: 'C', budget: { budget: 12.35 } }] };
+      },
+    },
+  };
+  const result = await adsCampaignBudget.execute(ctx);
+  assert.equal(putBody.campaigns[0].budget.budget, 12.35);
+  assert.equal(result.verificationStatus, 'VERIFIED');
+});

@@ -5,8 +5,10 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { extractAccountArg, loadAccount, loadDotEnvIfPresent } from './internal/account.js';
-import { setAuditAccount } from './internal/audit.js';
+import { flushAuditUploads, setAuditAccount, setAuditOperation } from './internal/audit.js';
 import { AdsClient } from './internal/client/ads-client.js';
+import { closeEgressAgents } from './internal/net/egress.js';
+import { readPackageInfo } from './internal/package-info.js';
 import type { SpApiClient } from './internal/client/client.js';
 import {
   issuePreviewToken,
@@ -59,7 +61,8 @@ export function createAmazonMcpServer(
   account: string = 'default',
 ): McpServer {
   const server = new McpServer(
-    { name: `amz-cli-safe-writes-${account}`, version: '0.2.6' },
+    // 版本从随包 package.json 动态读取,避免与 npm 版本漂移(硬编码曾漂到过时值)
+    { name: `amz-cli-safe-writes-${account}`, version: readPackageInfo().version },
     {
       instructions:
         `当前 MCP 服务固定绑定店铺:${account}。所有 prepare_* 工具只预览；` +
@@ -67,6 +70,36 @@ export function createAmazonMcpServer(
         '客户端必须对每一次正式写工具调用向真人请求批准，不得自动批准或使用 bypassPermissions。',
     },
   );
+
+  // 在 registerTool 上包一层:每个工具 handler 执行前把操作名标进审计。
+  // CLI 路径由 tools/registry.ts 的 runTool 标注;MCP 长驻进程若不标注,
+  // 审计行的 op 恒为空,中央看板无法区分某次写入来自哪个 MCP 工具。
+  // 包在注册处(而不是逐个 handler 里加)让后续所有注册自动生效。
+  const originalRegisterTool = server.registerTool.bind(server) as (
+    name: string,
+    config: unknown,
+    cb: (...cbArgs: unknown[]) => unknown,
+  ) => unknown;
+  (server as { registerTool: unknown }).registerTool = (
+    name: string,
+    config: unknown,
+    cb: (...cbArgs: unknown[]) => unknown,
+  ) =>
+    originalRegisterTool(name, config, (...cbArgs: unknown[]) => {
+      setAuditOperation(`mcp ${name}`);
+      return cb(...cbArgs);
+    });
+
+  // 长驻 MCP 进程没有 CLI main() 那样的 finally 出口:stdio 连接关闭(Cherry 退出/
+  // 断开)时补上尾部审计行的中央上报,并关掉代理连接池 —— 不关的话配了代理的
+  // 账号进程可能一直不退出。都是旁路清理,失败不影响已完成的业务。
+  const previousOnClose = server.server.onclose;
+  server.server.onclose = () => {
+    previousOnClose?.();
+    void flushAuditUploads().finally(() => {
+      void closeEgressAgents();
+    });
+  };
 
   registerOperationalWriteTools(server, factories, account);
 

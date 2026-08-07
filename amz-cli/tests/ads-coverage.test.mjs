@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { extractAdCoverage } from '../dist/shortcuts/ads/product-ads.js';
+import { AmzError } from '../dist/internal/errs/errors.js';
+import { adsProductAds, extractAdCoverage } from '../dist/shortcuts/ads/product-ads.js';
 
 const ads = [
   { adId: 'a1', campaignId: 'c1', adGroupId: 'g1', sku: 'SKU-A', state: 'ENABLED' },
@@ -29,4 +30,43 @@ test('extractAdCoverage 状态匹配大小写不敏感', () => {
 test('extractAdCoverage 缺字段时安全返回 undefined', () => {
   const rows = extractAdCoverage([{ state: 'ENABLED' }], ['ENABLED']);
   assert.deepEqual(rows[0], { asin: undefined, sku: undefined, adId: undefined, adGroupId: undefined, campaignId: undefined, state: 'ENABLED' });
+});
+
+test('product-ads 自动翻页合并各页,并把 nextToken 传给下一页请求', async () => {
+  const calls = [];
+  const ctx = {
+    flags: { profileId: '123' },
+    progress() {},
+    adsClient: {
+      async request(method, path, opts) {
+        calls.push({ method, path, opts });
+        if (calls.length === 1) return { productAds: [{ adId: 'a1' }], nextToken: 'p2' };
+        return { productAds: [{ adId: 'a2' }] };
+      },
+    },
+  };
+  const result = await adsProductAds.execute(ctx);
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].opts.body.nextToken, undefined);
+  assert.equal(calls[1].opts.body.nextToken, 'p2');
+  assert.equal(result.count, 2);
+});
+
+test('product-ads nextToken 死循环时 100 页熔断,不无限拉取', async () => {
+  let calls = 0;
+  const ctx = {
+    flags: { profileId: '123' },
+    progress() {},
+    adsClient: {
+      async request() {
+        calls += 1;
+        return { productAds: [], nextToken: 'again' };
+      },
+    },
+  };
+  await assert.rejects(
+    adsProductAds.execute(ctx),
+    (error) => error instanceof AmzError && error.subtype === 'ads.product_ads_pagination_limit',
+  );
+  assert.equal(calls, 100);
 });

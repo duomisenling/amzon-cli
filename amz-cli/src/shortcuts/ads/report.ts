@@ -74,20 +74,39 @@ export interface AdsReportConfig {
   desc?: string;
 }
 
-/** 从 flag 组装报表配置(供 ads report-run 用)。 */
-function adsConfigFromFlags(ctx: ToolContext): AdsReportConfig {
+/** 从 flag 组装报表配置(供 ads report-run 用;导出仅为单测)。 */
+export function adsConfigFromFlags(ctx: Pick<ToolContext, 'flags'>): AdsReportConfig {
   const start = requireDate(ctx.flags, 'start', '--start');
   const end = requireDate(ctx.flags, 'end', '--end');
   const typeFlag = (strFlag(ctx.flags, 'type') ?? 'campaigns').trim();
   const preset = REPORT_PRESETS[typeFlag.toLowerCase()];
   const reportTypeId = preset?.reportTypeId ?? typeFlag;
+  // split 后 trim + 过滤空项:"a,,b" 或首尾逗号不能把空字符串传给 API
   const columns = (strFlag(ctx.flags, 'columns') ?? preset?.columns ?? DEFAULT_COLUMNS)
     .split(',')
-    .map((s) => s.trim());
+    .map((s) => s.trim())
+    .filter(Boolean);
   const groupBy = (strFlag(ctx.flags, 'groupBy') ?? preset?.groupBy ?? 'campaign,adGroup')
     .split(',')
-    .map((s) => s.trim());
+    .map((s) => s.trim())
+    .filter(Boolean);
   return { reportTypeId, groupBy, columns, start, end, desc: preset?.desc };
+}
+
+/** --report-id 缺失或空串时抛类型化参数错误,避免拼出 /reports/undefined。 */
+function requireReportId(flags: Record<string, unknown>): string {
+  const reportId = strFlag(flags, 'reportId');
+  if (!reportId) {
+    throw new AmzError({
+      type: 'invalid_param',
+      subtype: 'ads.missing_report_id',
+      param: '--report-id',
+      hintAgent: 'fix_param',
+      hintHuman: '--report-id 不能为空,请传入 ads report-run 返回的报表编号。',
+      message: '--report-id is required and must not be empty',
+    });
+  }
+  return reportId;
 }
 
 async function createReport(ctx: ToolContext, profileId: string, cfg: AdsReportConfig): Promise<string> {
@@ -150,6 +169,8 @@ export async function fetchAdsReportRows(
     gzip: true,
     what: '广告报表',
     subtype: 'ads.report_download_failed',
+    // 广告报表走广告的出口(ADS_PROXY;留空则复用 SP_API_PROXY)
+    channel: 'ads',
   });
   const parsed = JSON.parse(buf.toString('utf8')) as unknown;
   return Array.isArray(parsed) ? (parsed as Array<Record<string, unknown>>) : [];
@@ -227,6 +248,8 @@ async function downloadAdsReport(
     gzip: true,
     what: '广告报表',
     subtype: 'ads.report_download_failed',
+    // 广告报表走广告的出口(ADS_PROXY;留空则复用 SP_API_PROXY)
+    channel: 'ads',
   });
   const rows = JSON.parse(buf.toString('utf8')) as unknown[];
   return { reportId, rowCount: Array.isArray(rows) ? rows.length : undefined, rows };
@@ -242,8 +265,12 @@ export const adsReportStatus: ToolDefinition = {
     ADS_REGION_FLAG,
     { name: 'report-id', desc: 'ads report-run 返回的报表编号(必填)', required: true },
   ],
+  validate: (flags) => {
+    requireProfileId(flags);
+    requireReportId(flags);
+  },
   execute: async (ctx) => {
-    return getReportStatus(ctx.adsClient, requireProfileId(ctx.flags), strFlag(ctx.flags, 'reportId')!, adsRegion(ctx.flags));
+    return getReportStatus(ctx.adsClient, requireProfileId(ctx.flags), requireReportId(ctx.flags), adsRegion(ctx.flags));
   },
 };
 

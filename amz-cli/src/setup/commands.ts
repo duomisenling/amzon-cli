@@ -43,13 +43,18 @@ export function registerSetupCommands(program: Command, info: PackageInfo): void
     .option('--combined', '生成一个多店铺 MCP；每次写操作必须通过 account 明确选择店铺')
     .option('--portable', '生成可交给其他 Windows 同事直接导入的配置，不写入本机绝对路径')
     .option('--include-default', '同时生成读取主 ~/.amz-cli/.env 的默认账号服务')
+    .option(
+      '--allow-writes',
+      '生成的配置开启 MCP 正式写入(AMZ_MCP_ALLOW_WRITES=true)。仅限管理员确认 Cherry 使用逐次审批后使用；默认关闭',
+    )
     .option('--output <文件>', '写成可直接导入的 JSON 文件；已有文件绝不覆盖')
-    .action((options: { accounts?: string; combined?: boolean; portable?: boolean; includeDefault?: boolean; output?: string }) => {
+    .action((options: { accounts?: string; combined?: boolean; portable?: boolean; includeDefault?: boolean; allowWrites?: boolean; output?: string }) => {
       const accounts = parseMcpAccounts(options.accounts);
       const mcpConfig = createCherryMcpConfig(accounts, {
         combined: Boolean(options.combined),
         portable: Boolean(options.portable),
         includeDefault: Boolean(options.includeDefault),
+        allowWrites: Boolean(options.allowWrites),
       });
       const outputPath = options.output
         ? writeCherryMcpConfig(options.output, mcpConfig)
@@ -57,6 +62,14 @@ export function registerSetupCommands(program: Command, info: PackageInfo): void
       outSuccess({
         ...(outputPath ? { outputPath } : {}),
         config: mcpConfig,
+        writesEnabled: Boolean(options.allowWrites),
+        ...(options.allowWrites
+          ? {}
+          : {
+              writesNote:
+                'MCP 正式写入默认关闭(只能预览)。管理员确认 Cherry 使用逐次审批后,' +
+                '可重新生成配置并加 --allow-writes,或手动把 AMZ_MCP_ALLOW_WRITES 改为 true。',
+            }),
         accounts: [
           ...(options.includeDefault ? ['default'] : []),
           ...accounts,

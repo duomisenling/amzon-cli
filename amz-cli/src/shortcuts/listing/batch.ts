@@ -10,7 +10,7 @@
 //   - 透传整个 attributes 对象,不在 CLI 里筛字段(筛是下游的事)。
 // 角色:Product Listing
 
-import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, readFileSync } from 'node:fs';
 import { AmzError } from '../../internal/errs/errors.js';
 import type { ToolContext, ToolDefinition } from '../../tools/types.js';
 import { resolveMarketplace, strFlag, validateNumberFlag } from '../common.js';
@@ -30,6 +30,33 @@ export function parseSkuList(raw: string): string[] {
     }
   }
   return out;
+}
+
+/** 把 include 集合归一化成可比较的字符串(去空白、去空项、排序);顺序不同不算变化。 */
+export function normalizeIncludeSet(include: string): string {
+  return [...new Set(include.split(',').map((s) => s.trim()).filter(Boolean))].sort().join(',');
+}
+
+/**
+ * 从已有 jsonl 输出里读出 journal 元信息(首个带 journalMeta 键的行)。
+ * 断点续跑要校验 --include 集合没变:旧 journal 里的行是按当时的 include 拉的,
+ * include 变了还按 SKU 跳过,会得到新旧数据集混杂的输出。老 journal 无 meta 行时返回 undefined。
+ */
+export function readJournalMeta(jsonlText: string): { include?: string } | undefined {
+  for (const line of jsonlText.split(/\r?\n/)) {
+    const t = line.trim();
+    if (!t) continue;
+    try {
+      const obj = JSON.parse(t) as { journalMeta?: { include?: unknown } };
+      if (obj.journalMeta && typeof obj.journalMeta === 'object') {
+        const include = obj.journalMeta.include;
+        return { ...(typeof include === 'string' ? { include } : {}) };
+      }
+    } catch {
+      // 坏行忽略
+    }
+  }
+  return undefined;
 }
 
 /** 从已有 jsonl 输出里读出"已完成的 SKU 集合"(每行一个对象,取 .sku),用于断点续跑。 */
@@ -149,8 +176,35 @@ export const listingBatch: ToolDefinition = {
       });
     }
 
-    // 断点续跑:已在 --out 里的 SKU 跳过
-    const done = existsSync(outPath) ? readDoneSkus(readFileSync(outPath, 'utf8')) : new Set<string>();
+    // 断点续跑:已在 --out 里的 SKU 跳过。
+    // journal 首行记录本次的 include 集合;续跑时 include 变了要报错,
+    // 否则旧行(旧 include 拉的)和新行会混成一份口径不一致的输出。
+    const normalizedInclude = normalizeIncludeSet(include);
+    let done = new Set<string>();
+    if (existsSync(outPath)) {
+      const journalText = readFileSync(outPath, 'utf8');
+      const meta = readJournalMeta(journalText);
+      if (meta?.include !== undefined && meta.include !== normalizedInclude) {
+        throw new AmzError({
+          type: 'invalid_param',
+          subtype: 'listing.batch_include_changed',
+          param: '--include',
+          hintAgent: 'report_to_human',
+          hintHuman:
+            `--out 文件 ${outPath} 是按 --include ${meta.include} 跑的,本次是 ${normalizedInclude},` +
+            '断点续跑会混出口径不一致的数据。请换一个新的 --out 文件,或删除旧文件后全新重跑。',
+          message: `journal include set (${meta.include}) differs from current --include (${normalizedInclude}); use a new --out file or delete it to restart`,
+        });
+      }
+      if (meta === undefined) {
+        // 老版本 journal 没有 meta 行:无法校验,提醒后放行(不破坏既有断点文件)
+        ctx.progress('· 注意:--out 是旧版 journal(无 include 元信息),无法校验 --include 是否与上次一致。');
+      }
+      done = readDoneSkus(journalText);
+    } else {
+      // 新 journal:先落 meta 行(readDoneSkus 会忽略它,不影响续跑统计)
+      appendFileSync(outPath, JSON.stringify({ journalMeta: { include: normalizedInclude } }) + '\n', 'utf8');
+    }
     const pending = allSkus.filter((sku) => !done.has(sku));
     ctx.progress(
       `· 共 ${allSkus.length} 个 SKU;已完成 ${done.size} 个(断点续跑跳过),本次拉 ${pending.length} 个,并发 ${concurrency}...`,
@@ -203,8 +257,3 @@ export const listingBatch: ToolDefinition = {
     };
   },
 };
-
-// 保证空批也创建 out 文件(便于下游无条件读取);仅在需要时使用。
-export function ensureOutFile(outPath: string): void {
-  if (!existsSync(outPath)) writeFileSync(outPath, '', 'utf8');
-}

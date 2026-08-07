@@ -13,8 +13,9 @@
 //   真正执行      CLI 要求交互式终端输入随机确认码(防误操作门禁)
 
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { AmzError } from '../../internal/errs/errors.js';
+import { amazonFetch } from '../../internal/net/egress.js';
 import type { ToolContext, ToolDefinition } from '../../tools/types.js';
 import { OPTIONAL_MARKETPLACE_FLAG, fetchDocumentBuffer, optionalRegion, resolveMarketplace, strFlag } from '../common.js';
 import type { Region } from '../../internal/client/regions.js';
@@ -94,12 +95,16 @@ async function uploadFeedDocument(ctx: ToolContext, content: string, region?: Re
 
   ctx.progress('· 正在上传 feed 内容...');
   // 预签名 S3 地址:PUT 原始内容,Content-Type 必须与 createFeedDocument 声明一致
-  const up = await fetch(doc.url, {
-    method: 'PUT',
-    headers: { 'Content-Type': FEED_CONTENT_TYPE },
-    body: content,
-    signal: AbortSignal.timeout(120_000),
-  });
+  const up = await amazonFetch(
+    doc.url,
+    {
+      method: 'PUT',
+      headers: { 'Content-Type': FEED_CONTENT_TYPE },
+      body: content,
+      signal: AbortSignal.timeout(120_000),
+    },
+    'sp',
+  );
   if (!up.ok) {
     throw new AmzError({
       type: 'upstream_error',
@@ -226,13 +231,33 @@ export const feedStatus: ToolDefinition = {
   },
 };
 
+/** feed result 直接回显 stdout 的最大字符数,超出部分需用 --out 落盘拿完整内容。 */
+export const FEED_RESULT_STDOUT_LIMIT = 50_000;
+
+/**
+ * 纯逻辑:feed 结果文本超长时截断,并显式带 truncated 标记与提示(不再静默 slice)。
+ * 便于单测;--out 落盘路径不经过它,写入的是完整内容。
+ */
+export function truncateFeedResult(
+  text: string,
+  limit = FEED_RESULT_STDOUT_LIMIT,
+): { result: string; truncated?: true; truncatedNote?: string } {
+  if (text.length <= limit) return { result: text };
+  return {
+    result: text.slice(0, limit),
+    truncated: true,
+    truncatedNote: `结果共 ${text.length} 字符,已截断到前 ${limit} 字符;要拿完整内容请加 --out <文件路径> 重新执行(--out 写入的是完整结果)。`,
+  };
+}
+
 export const feedResult: ToolDefinition = {
   service: 'feed',
   command: 'result',
-  description: '下载 feed 处理结果(哪些行成功/失败及原因)',
+  description: '下载 feed 处理结果(哪些行成功/失败及原因);超长自动截断,--out 可落盘完整内容',
   mutation: 'none',
   flags: [
     { name: 'feed-id', desc: 'feed 编号(必填)', required: true },
+    { name: 'out', desc: '把完整处理结果写到该文件路径(可选;stdout 回显超过 5 万字符会截断,--out 不截断)' },
     OPTIONAL_MARKETPLACE_FLAG,
   ],
   execute: async (ctx) => {
@@ -275,10 +300,25 @@ export const feedResult: ToolDefinition = {
       what: 'feed 处理结果',
       subtype: 'feed.result_download_failed',
     });
+    const text = buf.toString('utf8');
+    const out = strFlag(ctx.flags, 'out');
+    if (out) {
+      // --out 落盘完整内容,不截断
+      writeFileSync(out, text, 'utf8');
+      return {
+        feedId,
+        processingStatus: feed.processingStatus,
+        savedTo: out,
+        resultChars: text.length,
+        note: `完整处理结果(${text.length} 字符)已写入 ${out}`,
+      };
+    }
+    const { result, truncated, truncatedNote } = truncateFeedResult(text);
     return {
       feedId,
       processingStatus: feed.processingStatus,
-      result: buf.toString('utf8').slice(0, 50_000),
+      result,
+      ...(truncated ? { truncated, note: truncatedNote } : {}),
     };
   },
 };

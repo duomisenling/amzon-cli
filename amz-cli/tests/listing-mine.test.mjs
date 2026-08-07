@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { afterEach, test } from 'node:test';
-import { listingMine } from '../dist/shortcuts/listing/mine.js';
+import { listingMine, resolveUniqueListingSku } from '../dist/shortcuts/listing/mine.js';
 
 afterEach(() => {
   delete process.env.SELLER_ID;
@@ -86,5 +86,40 @@ test('listing mine rejects more than 20 ASINs', () => {
   assert.throws(
     () => listingMine.validate({ marketplace: 'US', asin: asins }),
     (error) => error?.subtype === 'invalid_identifier_count',
+  );
+});
+
+test('resolveUniqueListingSku:ASIN 对应 SKU 超一页(numberOfResults > 返回条数)时报错,不误判唯一', async () => {
+  const items = Array.from({ length: 20 }, (_, i) => ({
+    sku: `SKU-${i}`,
+    summaries: [{ asin: 'B0AAAAAAAA' }],
+  }));
+  const client = {
+    async get() {
+      // 共 25 条,但一页只回 20 条:剩下 5 条里可能还有别的 SKU,不能当作已看全
+      return { numberOfResults: 25, items };
+    },
+  };
+  await assert.rejects(
+    () => resolveUniqueListingSku({ marketplace: 'US', asin: 'B0AAAAAAAA', sellerId: 'SELLER' }, client),
+    (error) => error?.subtype === 'listing.asin_too_many_skus',
+  );
+});
+
+test('resolveUniqueListingSku:numberOfResults 与返回条数一致时维持原判定(多匹配仍报 ambiguous)', async () => {
+  const client = {
+    async get() {
+      return {
+        numberOfResults: 2,
+        items: [
+          { sku: 'SKU-A', summaries: [{ asin: 'B0AAAAAAAA' }] },
+          { sku: 'SKU-B', summaries: [{ asin: 'B0AAAAAAAA' }] },
+        ],
+      };
+    },
+  };
+  await assert.rejects(
+    () => resolveUniqueListingSku({ marketplace: 'US', asin: 'B0AAAAAAAA', sellerId: 'SELLER' }, client),
+    (error) => error?.subtype === 'listing.asin_ambiguous',
   );
 });

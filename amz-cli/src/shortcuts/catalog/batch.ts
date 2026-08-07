@@ -29,12 +29,15 @@ interface CatalogItem {
   [key: string]: unknown;
 }
 
-/** 把逗号/换行/空格分隔的原始文本解析成去重后的 ASIN 列表(保持首次出现顺序)。 */
+/** 把逗号/换行/空格分隔的原始文本解析成去重后的 ASIN 列表(保持首次出现顺序)。
+ *  入口统一转大写(与 pricing/buybox 一致):API 返回的 asin 是大写,
+ *  若保留用户的小写原样,后续按 asin 建 Map 匹配会静默 miss(误标 found:false),
+ *  去重也会把 b0x/B0X 当成两个。 */
 export function parseAsinList(raw: string): string[] {
   const seen = new Set<string>();
   const out: string[] = [];
   for (const token of raw.split(/[\s,]+/)) {
-    const asin = token.trim();
+    const asin = token.trim().toUpperCase();
     if (asin && !seen.has(asin)) {
       seen.add(asin);
       out.push(asin);
@@ -43,7 +46,7 @@ export function parseAsinList(raw: string): string[] {
   return out;
 }
 
-/** ASIN 格式校验:10 位字母或数字。Catalog API 对格式非法的标识符会 400 拒整批,
+/** ASIN 格式校验:10 位字母或数字(入口已统一大写)。Catalog API 对格式非法的标识符会 400 拒整批,
  *  所以格式非法的先挡在客户端,不发给 API(它们会被记为 found:false)。 */
 export function isValidAsinFormat(asin: string): boolean {
   return /^[A-Z0-9]{10}$/i.test(asin);
@@ -65,12 +68,13 @@ export function buildBatchRecords(
   foundItems: CatalogItem[],
   extraSets: string[],
 ): Array<Record<string, unknown>> {
+  // 统一按大写匹配(入口已大写,这里再兜底一次,防调用方直接传原样输入)
   const byAsin = new Map<string, CatalogItem>();
   for (const item of foundItems) {
-    if (item.asin) byAsin.set(item.asin, item);
+    if (item.asin) byAsin.set(item.asin.toUpperCase(), item);
   }
   return requestedAsins.map((asin) => {
-    const item = byAsin.get(asin);
+    const item = byAsin.get(asin.toUpperCase());
     if (!item) return { asin, found: false };
     return { found: true, ...simplifyItem(item, extraSets) };
   });

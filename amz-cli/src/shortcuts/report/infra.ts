@@ -23,6 +23,21 @@ export interface ReportStatus {
   processingEndTime?: string;
 }
 
+/**
+ * 取 DONE 报告的 reportDocumentId;缺失时抛类型化上游错误。
+ * 不能用非空断言(!):DONE 但缺 documentId 时会拼出 /documents/undefined 的请求。
+ */
+export function requireReportDocumentId(status: ReportStatus): string {
+  if (status.reportDocumentId) return status.reportDocumentId;
+  throw new AmzError({
+    type: 'upstream_error',
+    subtype: 'report.missing_document_id',
+    hintAgent: 'report_to_human',
+    hintHuman: '报告已完成(DONE)但亚马逊没有返回文档 ID,无法下载内容。请重试;若反复出现请联系管理员。',
+    message: `report ${status.reportId} is DONE but has no reportDocumentId`,
+  });
+}
+
 /** 发起报告请求,返回 reportId。 */
 export async function requestReport(
   ctx: ToolContext,
@@ -161,7 +176,7 @@ export async function runReportRows(
     reportOptions: opts.reportOptions,
   });
   const status = await waitForReport(ctx, reportId, opts.timeoutMinutes ?? 10, marketplace.region);
-  const text = await downloadReportDocument(ctx, status.reportDocumentId!, marketplace.region);
+  const text = await downloadReportDocument(ctx, requireReportDocumentId(status), marketplace.region);
   return parseReport(text, opts.maxRows ?? 100_000);
 }
 

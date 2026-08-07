@@ -203,15 +203,17 @@ SP_API_REGION=na
 3. 管理员只需在自己的 PowerShell 生成一次便携 JSON（输出文件已存在时会安全拒绝，不会覆盖）：
 
 ```powershell
-amz-cli config mcp --combined --portable --accounts shop-a,shop-b,shop-c,shop-d,shop-e --output "$env:USERPROFILE\amz-cli-mcp.json"
+amz-cli config mcp --combined --portable --accounts shop-a,shop-b,shop-c,shop-d,shop-e --allow-writes --output "$env:USERPROFILE\amz-cli-mcp.json"
 ```
+
+`--allow-writes` 会在配置里写入 `AMZ_MCP_ALLOW_WRITES=true`，开启正式写入。**不加它生成的配置只能预览**（默认关闭）——只有管理员确认 Cherry 使用逐次审批、未启用 bypassPermissions 后才应加这个开关。
 
 合并模式不允许 `--include-default`。便携 JSON 可以发给所有 Windows 同事使用，但它不包含 MCP 程序和 Amazon 凭证；没有安装 `amz-cli` 或没有账号文件时，单独导入 JSON 无法运行。
 
 如果需要兼容旧的每店一个固定 MCP，可以不加 `--combined`：
 
 ```powershell
-amz-cli config mcp --portable --accounts shop-a,shop-b --output "$env:USERPROFILE\amz-cli-mcp-separate.json"
+amz-cli config mcp --portable --accounts shop-a,shop-b --allow-writes --output "$env:USERPROFILE\amz-cli-mcp-separate.json"
 ```
 
 4. 同事打开 Cherry Studio → 设置 → **MCP 服务器** → **从 JSON 导入**，选择管理员发来的同一个文件，不需要在同事电脑重新生成。

@@ -20,6 +20,8 @@ import { ADS_REGION_FLAG, adsRegion, adsResponseGroup, requireProfileId } from '
 /** 单次批量上限(项目决策:一次最多 100 条)。 */
 export const MAX_STATE_BATCH = 100;
 const PUT_CHUNK = 100;
+/** list 翻页熔断上限(照 campaign-extend listAll 的写法,防 nextToken 死循环)。 */
+const MAX_LIST_PAGES = 100;
 
 export type CampaignState = 'ENABLED' | 'PAUSED';
 
@@ -34,7 +36,7 @@ export interface CurrentCampaign {
   name?: string;
 }
 
-export type StateRowStatus = 'change' | 'no-change' | 'not-found';
+export type StateRowStatus = 'change' | 'no-change' | 'not-found' | 'not-applicable';
 
 export interface StatePlanRow {
   campaignId: string;
@@ -42,6 +44,8 @@ export interface StatePlanRow {
   currentState?: string;
   newState: CampaignState;
   status: StateRowStatus;
+  /** 仅 not-applicable 时给出原因(如已归档)。 */
+  reason?: string;
 }
 
 export interface StatePlan {
@@ -49,6 +53,8 @@ export interface StatePlan {
   willChange: StateChange[];
   noChange: StateChange[];
   notFound: StateChange[];
+  /** 当前已 ARCHIVED 的 campaign:归档不可逆,执行必被拒,预览就剔除,不进 willChange。 */
+  notApplicable: StateChange[];
 }
 
 function invalid(subtype: string, hintHuman: string, message: string, param?: string): AmzError {
@@ -97,7 +103,10 @@ export function parseStateChanges(raw: unknown): StateChange[] {
   return out.sort((a, b) => (a.campaignId < b.campaignId ? -1 : a.campaignId > b.campaignId ? 1 : 0));
 }
 
-/** 纯函数:对齐目标状态与远端当前状态,分出真正要改 / 无变化 / 找不到。 */
+/**
+ * 纯函数:对齐目标状态与远端当前状态,分出真正要改 / 无变化 / 找不到 / 不可操作。
+ * 当前 ARCHIVED 判为 not-applicable(归档不可逆,改状态必被拒,预览就剔除)。
+ */
 export function planStateChanges(changes: StateChange[], current: CurrentCampaign[]): StatePlan {
   const byId = new Map<string, CurrentCampaign>();
   for (const c of current) byId.set(String(c.campaignId), c);
@@ -106,6 +115,7 @@ export function planStateChanges(changes: StateChange[], current: CurrentCampaig
   const willChange: StateChange[] = [];
   const noChange: StateChange[] = [];
   const notFound: StateChange[] = [];
+  const notApplicable: StateChange[] = [];
 
   for (const ch of changes) {
     const cur = byId.get(ch.campaignId);
@@ -122,7 +132,11 @@ export function planStateChanges(changes: StateChange[], current: CurrentCampaig
       newState: ch.state,
       status: 'change',
     };
-    if (currentState === ch.state) {
+    if (currentState?.toUpperCase() === 'ARCHIVED') {
+      row.status = 'not-applicable';
+      row.reason = '广告活动已归档(ARCHIVED 不可逆),无法启用/暂停';
+      notApplicable.push(ch);
+    } else if (currentState === ch.state) {
       row.status = 'no-change';
       noChange.push(ch);
     } else {
@@ -130,7 +144,7 @@ export function planStateChanges(changes: StateChange[], current: CurrentCampaig
     }
     rows.push(row);
   }
-  return { rows, willChange, noChange, notFound };
+  return { rows, willChange, noChange, notFound, notApplicable };
 }
 
 function chunk<T>(arr: T[], size: number): T[][] {
@@ -170,8 +184,12 @@ function asCurrentArray(value: unknown): CurrentCampaign[] {
   return Array.isArray(value) ? (value as CurrentCampaign[]) : [];
 }
 
-/** 批量读当前 campaign 状态(按 100 分片查 campaignIdFilter,合并并排序)。 */
-async function fetchCurrentCampaigns(
+/**
+ * 批量读当前 campaign 状态(按 100 分片查 campaignIdFilter,合并并排序)。
+ * 每片带 maxResults 并处理 nextToken 翻页(带页数熔断):否则接近 100 条时
+ * 后续 campaign 会被误判 not-found 而静默跳过。导出仅为单测。
+ */
+export async function fetchCurrentCampaigns(
   client: AdsClient,
   profileId: string,
   ids: string[],
@@ -179,18 +197,40 @@ async function fetchCurrentCampaigns(
 ): Promise<CurrentCampaign[]> {
   const out: CurrentCampaign[] = [];
   for (const idChunk of chunk(ids, PUT_CHUNK)) {
-    const resp = (await client.request('POST', '/sp/campaigns/list', {
-      profileId,
-      region,
-      contentType: ADS_CONTENT_TYPES.spCampaign,
-      retry5xx: true,
-      body: { campaignIdFilter: { include: idChunk } },
-    })) as { campaigns?: Array<Record<string, unknown>> } | null;
-    for (const c of resp?.campaigns ?? []) {
-      out.push({
-        campaignId: String(c['campaignId']),
-        state: c['state'] != null ? String(c['state']) : undefined,
-        name: c['name'] != null ? String(c['name']) : undefined,
+    let nextToken: string | undefined;
+    let exhausted = false;
+    for (let page = 0; page < MAX_LIST_PAGES; page += 1) {
+      const resp = (await client.request('POST', '/sp/campaigns/list', {
+        profileId,
+        region,
+        contentType: ADS_CONTENT_TYPES.spCampaign,
+        retry5xx: true,
+        body: {
+          campaignIdFilter: { include: idChunk },
+          maxResults: idChunk.length,
+          ...(nextToken ? { nextToken } : {}),
+        },
+      })) as { campaigns?: Array<Record<string, unknown>>; nextToken?: string } | null;
+      for (const c of resp?.campaigns ?? []) {
+        out.push({
+          campaignId: String(c['campaignId']),
+          state: c['state'] != null ? String(c['state']) : undefined,
+          name: c['name'] != null ? String(c['name']) : undefined,
+        });
+      }
+      nextToken = typeof resp?.nextToken === 'string' && resp.nextToken ? resp.nextToken : undefined;
+      if (!nextToken) {
+        exhausted = true;
+        break;
+      }
+    }
+    if (!exhausted) {
+      throw new AmzError({
+        type: 'upstream_error',
+        subtype: 'ads.state_batch_pagination_limit',
+        hintAgent: 'report_to_human',
+        hintHuman: '读取当前广告活动状态时分页超过安全上限,已停止,未执行任何写入。',
+        message: `state-batch campaign list pagination exceeded ${MAX_LIST_PAGES} pages`,
       });
     }
   }
@@ -238,8 +278,8 @@ export const adsStateBatch: ToolDefinition = {
         subtype: 'ads.state_batch_no_change',
         hintAgent: 'report_to_human',
         hintHuman:
-          `清单里没有需要实际修改的广告活动(无变化 ${plan.noChange.length} 个、找不到 ${plan.notFound.length} 个),不签发确认令牌。`,
-        message: `state-batch produced no effective change (noChange=${plan.noChange.length}, notFound=${plan.notFound.length})`,
+          `清单里没有需要实际修改的广告活动(无变化 ${plan.noChange.length} 个、找不到 ${plan.notFound.length} 个、已归档 ${plan.notApplicable.length} 个),不签发确认令牌。`,
+        message: `state-batch produced no effective change (noChange=${plan.noChange.length}, notFound=${plan.notFound.length}, notApplicable=${plan.notApplicable.length})`,
       });
     }
     const willEnable = plan.willChange.filter((c) => c.state === 'ENABLED').length;
@@ -250,6 +290,10 @@ export const adsStateBatch: ToolDefinition = {
       willEnable,
       noChange: plan.noChange.length,
       notFound: plan.notFound.length,
+      notApplicable: plan.notApplicable.length,
+      ...(plan.notApplicable.length > 0
+        ? { not_applicable_note: '已归档(ARCHIVED)的广告活动不可逆、无法启用/暂停,已从执行清单剔除。' }
+        : {}),
       ...(willEnable > 0 ? { effect: `⚠️ 其中 ${willEnable} 个将被【启用】,立即开始投放花钱` } : {}),
       rows: plan.rows,
     };
@@ -265,6 +309,9 @@ export const adsStateBatch: ToolDefinition = {
 
     const applied: Array<{ campaignId: string; state: CampaignState }> = [];
     const failed: Array<{ campaignId: string; reason: string }> = [];
+    // 结果不明 ≠ 失败:网络中断(write_result_unknown)或响应形状未知时,写入可能已生效,
+    // 与确定性失败分开统计,防止被当成"失败"直接重跑。
+    const resultUnknown: Array<{ campaignId: string; reason: string }> = [];
 
     for (const part of chunk(toApply, PUT_CHUNK)) {
       ctx.progress(`· 正在写入 ${applied.length + part.length}/${toApply.length} 个状态...`);
@@ -278,7 +325,7 @@ export const adsStateBatch: ToolDefinition = {
         });
         const group = adsResponseGroup(resp, 'campaigns');
         if (!group.known) {
-          for (const c of part) failed.push({ campaignId: c.campaignId, reason: 'UNKNOWN_RESPONSE_SHAPE' });
+          for (const c of part) resultUnknown.push({ campaignId: c.campaignId, reason: 'UNKNOWN_RESPONSE_SHAPE' });
           continue;
         }
         const okIds = new Set(group.success.map((s) => String(s['campaignId'])));
@@ -287,8 +334,11 @@ export const adsStateBatch: ToolDefinition = {
           else failed.push({ campaignId: c.campaignId, reason: 'REJECTED_BY_AMAZON' });
         }
       } catch (err) {
-        const reason = err instanceof Error ? err.message : String(err);
-        for (const c of part) failed.push({ campaignId: c.campaignId, reason: reason.slice(0, 200) });
+        // 确定未发出/被拒的计入 failed;结果不明(可能已生效)单独计入 resultUnknown。
+        const ambiguous = err instanceof AmzError && err.subtype === 'ads.write_result_unknown';
+        const reason = (err instanceof Error ? err.message : String(err)).slice(0, 200);
+        const bucket = ambiguous ? resultUnknown : failed;
+        for (const c of part) bucket.push({ campaignId: c.campaignId, reason });
       }
     }
 
@@ -298,10 +348,20 @@ export const adsStateBatch: ToolDefinition = {
       attempted: toApply.length,
       appliedCount: applied.length,
       failedCount: failed.length,
+      resultUnknownCount: resultUnknown.length,
       noChange: plan.noChange.length,
       notFound: plan.notFound.length,
+      notApplicable: plan.notApplicable.length,
       applied,
       ...(failed.length > 0 ? { failed } : {}),
+      ...(resultUnknown.length > 0 ? { resultUnknown } : {}),
+      ...(resultUnknown.length > 0
+        ? {
+            result_unknown_note:
+              '⚠️ resultUnknown 中的广告活动写入结果不明(网络中断或响应无法识别),状态可能已经改成功——' +
+              '尤其"启用"可能已在花钱。不要直接重跑;请先用 ads campaigns 或广告后台核对当前状态,再决定是否重新预览。',
+          }
+        : {}),
       ...(failed.length > 0
         ? { note: '部分广告活动未成功(见 failed)。不要自动重试整批;只对失败项重新预览或到后台核对。' }
         : {}),

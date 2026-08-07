@@ -78,14 +78,14 @@ interface Acc {
 }
 
 /**
- * 纯聚合:天级明细 → 按活动(或活动×广告组)汇总 → 算派生指标 → 标"花费零单" → 最差排前。
- * 排序:先纯烧钱(有花费零销售额,花费降序),再按 ACOS 降序,平手按花费降序。
+ * 纯聚合:天级明细 → 按活动(或活动×广告组)汇总 → 算派生指标 → 标"花费零单"。
+ * 返回未过滤、未排序的全量列表;总体指标必须在这份全量上算,避免被筛选口径误导。
  */
-export function aggregateAdsPerformance(
+export function buildAdsPerfRows(
   rows: Array<Record<string, unknown>>,
-  opts: AdsPerfOptions,
+  by: 'campaign' | 'ad-group',
 ): AdsPerfRow[] {
-  const byAdGroup = opts.by === 'ad-group';
+  const byAdGroup = by === 'ad-group';
   const map = new Map<string, Acc>();
   for (const row of rows) {
     const campaignId = row['campaignId'] != null ? String(row['campaignId']) : undefined;
@@ -136,11 +136,15 @@ export function aggregateAdsPerformance(
       spendNoSales,
     });
   }
+  return out;
+}
 
+/** 纯函数:在全量汇总行上应用阈值筛选 + 最差排前 + limit 截断。 */
+export function filterAndSortAdsPerfRows(all: AdsPerfRow[], opts: AdsPerfOptions): AdsPerfRow[] {
   // 排序权重:纯烧钱视作 ACOS 无穷大,排最前
   const weight = (r: AdsPerfRow): number =>
     r.spendNoSales ? Number.POSITIVE_INFINITY : (r.acos ?? -1);
-  const filtered = out
+  const filtered = all
     .filter((r) => r.cost >= opts.minSpend)
     .filter((r) =>
       opts.acosMin === undefined ? true : r.spendNoSales || (r.acos ?? -1) >= opts.acosMin,
@@ -152,6 +156,17 @@ export function aggregateAdsPerformance(
       return b.cost - a.cost;
     });
   return typeof opts.limit === 'number' ? filtered.slice(0, opts.limit) : filtered;
+}
+
+/**
+ * 纯聚合(汇总+筛选一步到位):天级明细 → 按活动(或活动×广告组)汇总 → 筛选排序。
+ * 排序:先纯烧钱(有花费零销售额,花费降序),再按 ACOS 降序,平手按花费降序。
+ */
+export function aggregateAdsPerformance(
+  rows: Array<Record<string, unknown>>,
+  opts: AdsPerfOptions,
+): AdsPerfRow[] {
+  return filterAndSortAdsPerfRows(buildAdsPerfRows(rows, opts.by), opts);
 }
 
 export const adsPerformance: ToolDefinition = {
@@ -221,13 +236,16 @@ export const adsPerformance: ToolDefinition = {
       timeout,
     );
 
-    const list = aggregateAdsPerformance(rows, { by, minSpend, acosMin, limit });
+    // 总体指标在过滤前的全量上算;rows 才应用 --min-spend/--acos-min/--limit 筛选,
+    // 避免"筛剩几行的合计"被误读成账户总体花费/ACOS。
+    const all = buildAdsPerfRows(rows, by);
+    const list = filterAndSortAdsPerfRows(all, { by, minSpend, acosMin, limit });
     const totalSpend = round(
-      list.reduce((s, r) => s + r.cost, 0),
+      all.reduce((s, r) => s + r.cost, 0),
       2,
     );
     const totalSales = round(
-      list.reduce((s, r) => s + r.sales, 0),
+      all.reduce((s, r) => s + r.sales, 0),
       2,
     );
     const overallAcos = totalSales > 0 ? round((totalSpend / totalSales) * 100, 1) : null;
@@ -236,8 +254,11 @@ export const adsPerformance: ToolDefinition = {
       profileId,
       window: `${start} ~ ${end}`,
       by,
+      totals_note: 'totalSpend/totalSales/overallAcos/spendNoSalesCount 按过滤前全量计算;rows 为筛选后结果(filteredCount/totalCount)',
+      filteredCount: list.length,
+      totalCount: all.length,
       count: list.length,
-      spendNoSalesCount: list.filter((r) => r.spendNoSales).length,
+      spendNoSalesCount: all.filter((r) => r.spendNoSales).length,
       totalSpend,
       totalSales,
       overallAcos,

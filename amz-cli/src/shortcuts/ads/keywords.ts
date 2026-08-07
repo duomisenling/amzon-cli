@@ -21,6 +21,7 @@ import {
   recordFromContext,
   requirePositiveAmount,
   requireProfileId,
+  round2,
   verifyAfterWrite,
 } from './common.js';
 
@@ -143,8 +144,9 @@ export const adsKeywordBid: ToolDefinition = {
         message: `keyword ${keywordId} not found`,
       });
     }
-    const newBid = requirePositiveAmount(ctx.flags, 'bid', '--bid');
-    assertChangeNeeded(Number(current['bid']), newBid, '关键词竞价');
+    // 写入与比较都按两位小数归一:0.855 这类值若不归一,回读比较必然 mismatch
+    const newBid = round2(requirePositiveAmount(ctx.flags, 'bid', '--bid'));
+    assertChangeNeeded(round2(Number(current['bid'])), newBid, '关键词竞价');
     return {
       dry_run_note: '请人工核对以下竞价改动;确认后凭本次预览令牌执行正式写入。',
       keyword: { id: keywordId, text: current['keywordText'], matchType: current['matchType'], state: current['state'] },
@@ -154,7 +156,8 @@ export const adsKeywordBid: ToolDefinition = {
   execute: async (ctx) => {
     const profileId = requireProfileId(ctx.flags);
     const keywordId = strFlag(ctx.flags, 'keywordId')!;
-    const newBid = requirePositiveAmount(ctx.flags, 'bid', '--bid');
+    // 与 dry-run 同口径:写入值两位小数归一,回读比较也用归一后的值
+    const newBid = round2(requirePositiveAmount(ctx.flags, 'bid', '--bid'));
     ctx.progress('· 正在修改关键词竞价...');
     const resp = await ctx.adsClient.request('PUT', '/sp/keywords', {
       profileId,
@@ -168,7 +171,7 @@ export const adsKeywordBid: ToolDefinition = {
     assertAdsWriteAccepted(resp, 'keywords', '竞价修改');
     const verification = await verifyAfterWrite(
       () => fetchKeyword(ctx.adsClient, profileId, keywordId, adsRegion(ctx.flags)),
-      (record) => Number(record['bid']) === newBid,
+      (record) => round2(Number(record['bid'])) === newBid,
       '即时回读未确认新竞价。不要自动重试写入，请稍后只读查询或到广告后台核对。',
     );
     return { result: resp, ...verification };

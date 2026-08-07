@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { selectAgedInventory } from '../dist/shortcuts/inventory/aged.js';
+import { selectAgedInventory, bucketsForMinAge } from '../dist/shortcuts/inventory/aged.js';
 import { selectStrandedInventory } from '../dist/shortcuts/inventory/stranded.js';
 import { aggregateReturnsBySku } from '../dist/shortcuts/returns/by-sku.js';
 import { aggregateWastedSpend } from '../dist/shortcuts/ads/wasted-spend.js';
@@ -24,6 +24,20 @@ test('selectAgedInventory 阈值放低到 181 把 181-270 档也计入', () => {
   const out = selectAgedInventory(rows, { minAgeDays: 181, minUnits: 1 });
   assert.equal(out[0].agedUnits, 10);
   assert.deepEqual(out[0].breakdown, { '181-270': 5, '271-365': 3, '365+': 2 });
+});
+
+test('selectAgedInventory 阈值 100 计入相交的 91-180 档,不再静默变成 181 起', () => {
+  const rows = [{ sku: 'A', 'inv-age-91-to-180-days': '7', 'inv-age-181-to-270-days': '5' }];
+  const out = selectAgedInventory(rows, { minAgeDays: 100, minUnits: 1 });
+  assert.equal(out[0].agedUnits, 12); // 修复前 91-180 整档被丢,只剩 5
+  assert.deepEqual(out[0].breakdown, { '91-180': 7, '181-270': 5 });
+});
+
+test('bucketsForMinAge 取与阈值相交的档;高阈值仍有 365+ 开区间档兜底,不会恒为空', () => {
+  assert.deepEqual(bucketsForMinAge(100).map((b) => b.label), ['91-180', '181-270', '271-365', '365+']);
+  assert.deepEqual(bucketsForMinAge(0).map((b) => b.label), ['0-30', '31-60', '61-90', '91-180', '181-270', '271-365', '365+']);
+  assert.deepEqual(bucketsForMinAge(400).map((b) => b.label), ['365+']); // 修复前 lo>=400 匹配不到任何档
+  assert.deepEqual(bucketsForMinAge(3650).map((b) => b.label), ['365+']);
 });
 
 // ---- inventory stranded ----

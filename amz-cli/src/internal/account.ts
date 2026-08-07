@@ -21,6 +21,20 @@ const ACCOUNT_CREDENTIAL_KEYS = [
   'ADS_CLIENT_ID',
   'ADS_CLIENT_SECRET',
   'ADS_REFRESH_TOKEN',
+  // 区域/沙盒/User-Agent 同样按账号生效,账号文件省略某行时必须落到默认值,
+  // 而不是静默继承共享 .env 或上一个账号的值。SP_API_SANDBOX 残留尤其危险:
+  // 会把该账号的请求整个打到沙盒(mock 数据当真数据),或反过来。
+  'SP_API_REGION',
+  'SP_API_SANDBOX',
+  'SP_API_USER_AGENT',
+  'ADS_USER_AGENT',
+  'ADS_REGION',
+  // 代理配置按账号生效,必须和凭证一起清空:否则上一个账号的代理会串到下一个。
+  // 这也保证了"某个账号就是要直连"只需不填,不会被别处的配置污染
+  // (哪怕共享 .env 或系统环境变量里设了,切账号时也会被清掉)。
+  'SP_API_PROXY',
+  'ADS_PROXY',
+  'EGRESS_LABEL',
 ] as const;
 
 const BROKER_KEYS = ['BROKER_URL', 'TEAM_TOKEN', 'STORE'] as const;
@@ -89,7 +103,7 @@ function readEnvFile(path: string): Record<string, string> {
 }
 
 function isAmzCliConfigKey(key: string): boolean {
-  return /^(?:LWA_|ADS_|SELLER_ID(?:_|$)|BROKER_URL$|TEAM_TOKEN$|STORE$|SP_API_)/.test(key);
+  return /^(?:LWA_|ADS_|SELLER_ID(?:_|$)|BROKER_URL$|TEAM_TOKEN$|STORE$|SP_API_|EGRESS_)/.test(key);
 }
 
 /**
@@ -118,7 +132,7 @@ function resolveAccountFile(dir: string, account: string): { file: string; canon
  * 加载显式选择的账号。调用前应先加载默认 .env，以便识别 Broker 模式；
  * 本地账号文件随后完整覆盖并隔离店铺凭证。
  *
- * 账号名大小写不敏感:用户可传 `cycayit`,自动匹配到 `Cycayit.env`。
+ * 账号名大小写不敏感:用户可传 `shopa`,自动匹配到 `ShopA.env`。
  * 返回归一后的规范账号名(本地=文件实际大小写;Broker=原样),
  * 供调用方统一用于审计归属与店铺路由,避免同店分成两个名字。
  */

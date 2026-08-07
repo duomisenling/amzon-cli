@@ -16,7 +16,7 @@
 import { writeFileSync } from 'node:fs';
 import type { MarketplaceInfo } from '../../internal/client/regions.js';
 import type { ToolContext, ToolDefinition } from '../../tools/types.js';
-import { resolveMarketplace, strFlag } from '../common.js';
+import { assertPageWithinLimit, resolveMarketplace, strFlag } from '../common.js';
 
 interface ContentMetadataRecord {
   contentReferenceKey?: string;
@@ -75,6 +75,8 @@ async function fetchAllDocuments(ctx: ToolContext, mkt: MarketplaceInfo): Promis
   let page = 0;
   do {
     page += 1;
+    // 翻页熔断:防上游 pageToken 异常导致无限翻页
+    assertPageWithinLimit(page, 'aplus.pagination_overflow', 'A+ 内容文档');
     ctx.progress(`· 正在拉取 ${mkt.country} 的 A+ 内容文档(第 ${page} 页)...`);
     const resp = (await ctx.client.get(
       '/aplus/2020-11-01/contentDocuments',
@@ -103,7 +105,11 @@ async function fetchAsinsForKey(
 ): Promise<string[]> {
   const asins: string[] = [];
   let pageToken: string | undefined;
+  let page = 0;
   do {
+    page += 1;
+    // 翻页熔断:防上游 pageToken 异常导致无限翻页
+    assertPageWithinLimit(page, 'aplus.pagination_overflow', 'A+ 文档关联 ASIN');
     // 响应字段是 asinMetadataSet(对象数组,每个含 asin/title/... );asinSet 只是请求过滤参数。
     const resp = (await ctx.client.get(
       `/aplus/2020-11-01/contentDocuments/${encodeURIComponent(contentReferenceKey)}/asins`,

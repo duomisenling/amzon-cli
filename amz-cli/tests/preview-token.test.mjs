@@ -104,3 +104,26 @@ test('changing referenced file content rejects the token', () => {
     { feedContentSha256: 'before' },
   );
 });
+
+// ───────────────────────────────── 运行时快照(确认令牌绑定的环境)
+
+test('沙盒开关进入运行时快照:预览后切换沙盒状态,快照必须不同', async () => {
+  // 这条拦的是"沙盒里 --dry-run 预览、关掉沙盒后 --confirm 打到生产":
+  // 若快照不含 SP_API_SANDBOX,这两个环境在校验眼里完全相同。
+  const { runtimeConfirmationSnapshot } = await import(
+    '../dist/internal/confirmation/runtime-snapshot.js'
+  );
+  const saved = process.env.SP_API_SANDBOX;
+  try {
+    process.env.SP_API_SANDBOX = 'true';
+    const inSandbox = runtimeConfirmationSnapshot();
+    delete process.env.SP_API_SANDBOX;
+    const inProd = runtimeConfirmationSnapshot();
+    assert.notDeepEqual(inSandbox, inProd, '沙盒开关切换后快照竟然相同 —— 令牌会被跨环境使用');
+    assert.equal(inSandbox.SP_API_SANDBOX, 'true');
+    assert.equal(inProd.SP_API_SANDBOX, '');
+  } finally {
+    if (saved === undefined) delete process.env.SP_API_SANDBOX;
+    else process.env.SP_API_SANDBOX = saved;
+  }
+});

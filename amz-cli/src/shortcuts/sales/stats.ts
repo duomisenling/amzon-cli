@@ -10,7 +10,15 @@
 
 import { AmzError } from '../../internal/errs/errors.js';
 import type { ToolDefinition } from '../../tools/types.js';
-import { daysAgoIso, resolveMarketplace, strFlag, validateIsoTimeRange, validateNumberFlag } from '../common.js';
+import {
+  daysAgoIso,
+  expandDateOnlyIso,
+  resolveMarketplace,
+  strFlag,
+  validateIsoTimeRange,
+  validateNumberFlag,
+  validateTimeZoneFlag,
+} from '../common.js';
 
 const GRANULARITIES = ['Hour', 'Day', 'Week', 'Month', 'Year', 'Total'];
 
@@ -32,8 +40,13 @@ export const salesStats: ToolDefinition = {
   flags: [
     { name: 'marketplace', desc: '市场,国家码如 US / CA / MX(必填)', required: true },
     { name: 'days', desc: '统计最近 N 天,默认 30(与 --start/--end 二选一)' },
-    { name: 'start', desc: '开始时间 ISO 8601,如 2026-07-01T00:00:00Z' },
-    { name: 'end', desc: '结束时间 ISO 8601(默认现在)' },
+    { name: 'start', desc: '开始时间 ISO 8601,如 2026-07-01T00:00:00Z;纯日期(2026-07-01)自动补全为当日 00:00:00(按 --timezone)' },
+    { name: 'end', desc: '结束时间 ISO 8601(默认现在);纯日期自动补全为当日 23:59:59(按 --timezone)' },
+    {
+      name: 'timezone',
+      desc:
+        'IANA 时区名,如 America/Los_Angeles;不填按 UTC 切日,与 Seller Central 本地时区日报有口径差',
+    },
     {
       name: 'granularity',
       desc: '聚合粒度,默认 Day。可选:Hour | Day | Week | Month | Year | Total',
@@ -57,14 +70,22 @@ export const salesStats: ToolDefinition = {
     }
     validateNumberFlag(flags, 'days', '--days', { min: 1, max: 365, integer: true });
     validateIsoTimeRange(flags);
+    validateTimeZoneFlag(flags);
   },
   execute: async (ctx) => {
     const mkt = resolveMarketplace(ctx.flags['marketplace']);
     const granularity = strFlag(ctx.flags, 'granularity') ?? 'Day';
+    // 切日时区:默认 UTC;--timezone 可对齐 Seller Central 本地时区日报口径
+    const timezone = strFlag(ctx.flags, 'timezone') ?? 'UTC';
 
-    // interval:两个 ISO8601 时间用 -- 连接(官方规范格式);整秒,UTC
-    const end = strFlag(ctx.flags, 'end') ?? daysAgoIso(0);
-    const start = strFlag(ctx.flags, 'start') ?? daysAgoIso(Number(strFlag(ctx.flags, 'days') ?? 30));
+    // interval:两个 ISO8601 时间用 -- 连接(官方规范格式);整秒。
+    // 纯日期输入(如 2026-07-01)API 必拒,本地补全成带时区偏移的完整时间戳(起=00:00:00,止=23:59:59)。
+    const end = expandDateOnlyIso(strFlag(ctx.flags, 'end') ?? daysAgoIso(0), true, timezone);
+    const start = expandDateOnlyIso(
+      strFlag(ctx.flags, 'start') ?? daysAgoIso(Number(strFlag(ctx.flags, 'days') ?? 30)),
+      false,
+      timezone,
+    );
 
     ctx.progress(`· 正在统计 ${mkt.country} 的销售数据(${granularity})...`);
 
@@ -72,7 +93,7 @@ export const salesStats: ToolDefinition = {
       marketplaceIds: mkt.id,
       interval: `${start}--${end}`,
       granularity,
-      ...(granularity !== 'Hour' ? { granularityTimeZone: 'UTC' } : {}),
+      ...(granularity !== 'Hour' ? { granularityTimeZone: timezone } : {}),
       ...(strFlag(ctx.flags, 'asin') ? { asin: strFlag(ctx.flags, 'asin') } : {}),
       ...(strFlag(ctx.flags, 'sku') ? { sku: strFlag(ctx.flags, 'sku') } : {}),
       ...(strFlag(ctx.flags, 'fulfillment')
@@ -99,6 +120,6 @@ export const salesStats: ToolDefinition = {
             units: rows.reduce((s, r) => s + r.units, 0),
           };
 
-    return { marketplace: mkt.country, granularity, ...(summary ? { summary } : {}), metrics: rows };
+    return { marketplace: mkt.country, granularity, timezone, ...(summary ? { summary } : {}), metrics: rows };
   },
 };

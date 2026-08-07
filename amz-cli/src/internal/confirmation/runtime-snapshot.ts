@@ -10,6 +10,9 @@ export function runtimeConfirmationSnapshot(): Record<string, unknown> {
     'STORE',
     'SP_API_REGION',
     'ADS_REGION',
+    // 沙盒开关必须进快照:否则"沙盒里 --dry-run 预览、关掉沙盒后 --confirm 打到生产"
+    // 会通过校验 —— 这正是这套快照要拦的环境漂移。
+    'SP_API_SANDBOX',
     'LWA_CLIENT_ID',
     'ADS_CLIENT_ID',
     'SELLER_ID',

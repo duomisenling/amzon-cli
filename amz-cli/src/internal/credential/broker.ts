@@ -98,6 +98,8 @@ export async function mintFromBroker(
   clientId?: string;
   sellerId?: string;
 }> {
+  // 刻意用普通 fetch,不走 net/egress 的代理:Broker 是自建的凭证服务,
+  // 代理只用于发往亚马逊的请求。不要"顺手统一"成 amazonFetch。
   const resp = await fetch(new URL('/token/mint', cfg.brokerUrl), {
     method: 'POST',
     headers: {

@@ -13,11 +13,15 @@
 
 import { writeFileSync } from 'node:fs';
 import { ADS_CONTENT_TYPES } from '../../internal/client/ads-client.js';
+import { AmzError } from '../../internal/errs/errors.js';
 import type { ToolContext, ToolDefinition } from '../../tools/types.js';
 import { strFlag } from '../common.js';
 import { ADS_REGION_FLAG, adsRegion, requireProfileId } from './common.js';
 
 type ProductAd = Record<string, unknown>;
+
+/** 翻页熔断上限(照 campaign-extend listAll 的写法,防 nextToken 死循环)。 */
+const MAX_LIST_PAGES = 100;
 
 export interface AdCoverageRow {
   asin?: string;
@@ -47,7 +51,7 @@ export function extractAdCoverage(productAds: ProductAd[], acceptedStates: strin
   return rows;
 }
 
-/** 翻完所有页,拿到该 profile 下全部 productAds(可选按状态服务端过滤)。 */
+/** 翻完所有页,拿到该 profile 下全部 productAds(可选按状态服务端过滤;带页数熔断)。 */
 async function fetchAllProductAds(
   ctx: ToolContext,
   profileId: string,
@@ -56,9 +60,7 @@ async function fetchAllProductAds(
 ): Promise<ProductAd[]> {
   const all: ProductAd[] = [];
   let nextToken: string | undefined;
-  let page = 0;
-  do {
-    page += 1;
+  for (let page = 1; page <= MAX_LIST_PAGES; page += 1) {
     ctx.progress(`· 正在拉取 profile ${profileId} 的投放商品(第 ${page} 页)...`);
     const resp = (await ctx.adsClient.request('POST', '/sp/productAds/list', {
       profileId,
@@ -72,9 +74,16 @@ async function fetchAllProductAds(
       },
     })) as { productAds?: ProductAd[]; nextToken?: string } | null;
     all.push(...(resp?.productAds ?? []));
-    nextToken = resp?.nextToken;
-  } while (nextToken);
-  return all;
+    nextToken = typeof resp?.nextToken === 'string' && resp.nextToken ? resp.nextToken : undefined;
+    if (!nextToken) return all;
+  }
+  throw new AmzError({
+    type: 'upstream_error',
+    subtype: 'ads.product_ads_pagination_limit',
+    hintAgent: 'report_to_human',
+    hintHuman: `拉取投放商品时分页超过安全上限(${MAX_LIST_PAGES} 页),已停止;请加 --state 过滤或联系维护者。`,
+    message: `productAds pagination exceeded ${MAX_LIST_PAGES} pages`,
+  });
 }
 
 function deliver(out: string | undefined, data: Record<string, unknown>): Record<string, unknown> {

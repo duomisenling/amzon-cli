@@ -350,6 +350,92 @@ test('multi-product plan creates all product ads in one call and verifies each o
   assert.equal(result.state, 'ENABLED');
 });
 
+test('unrecognized 207 shape on create is journaled as RESULT_UNKNOWN and blocks automatic resume', async () => {
+  const stateDir = isolatedState();
+  const parsed = parseKeywordCampaignPlan(JSON.stringify(plan()));
+  const first = new SuccessfulAdsClient();
+  first.request = async function (method, path, opts) {
+    this.calls.push({ method, path, opts });
+    // HTTP 成功但 207 结构不识别:Campaign 可能已创建,不能按 PARTIAL_FAILURE 续跑
+    if (method === 'POST' && path === '/sp/campaigns') return { unexpected: true };
+    throw new Error('unexpected');
+  };
+  await assert.rejects(
+    executeKeywordCampaignPlan(first, parsed),
+    (error) => error instanceof AmzError && error.subtype === 'ads.keyword_campaign_result_unknown',
+  );
+  const journalDir = join(stateDir, 'launches');
+  const journalName = (await import('node:fs')).readdirSync(journalDir)[0];
+  const journal = JSON.parse(readFileSync(join(journalDir, journalName), 'utf8'));
+  assert.equal(journal.status, 'RESULT_UNKNOWN');
+
+  // 结果不明后禁止自动续跑(重跑会重复创建整套广告)
+  const second = new SuccessfulAdsClient();
+  await assert.rejects(
+    executeKeywordCampaignPlan(second, parsed),
+    (error) => error instanceof AmzError && error.subtype === 'ads.keyword_campaign_reconcile_required',
+  );
+  assert.equal(second.calls.length, 0);
+});
+
+test('a success item without a campaignId is RESULT_UNKNOWN, not a resumable partial failure', async () => {
+  const stateDir = isolatedState();
+  const parsed = parseKeywordCampaignPlan(JSON.stringify(plan()));
+  const client = new SuccessfulAdsClient();
+  client.request = async function (method, path, opts) {
+    this.calls.push({ method, path, opts });
+    if (method === 'POST' && path === '/sp/campaigns') {
+      // 结构识别但成功项取不到 id:Campaign 已创建却无法登记,续跑会重复创建
+      return { campaigns: { error: [], success: [{ index: 0 }] } };
+    }
+    throw new Error('unexpected');
+  };
+  await assert.rejects(
+    executeKeywordCampaignPlan(client, parsed),
+    (error) => error instanceof AmzError && error.subtype === 'ads.keyword_campaign_result_unknown',
+  );
+  const journalDir = join(stateDir, 'launches');
+  const journalName = (await import('node:fs')).readdirSync(journalDir)[0];
+  const journal = JSON.parse(readFileSync(join(journalDir, journalName), 'utf8'));
+  assert.equal(journal.status, 'RESULT_UNKNOWN');
+});
+
+test('resume after an enable-step failure verifies against an already-ENABLED remote campaign', async () => {
+  isolatedState();
+  const parsed = parseKeywordCampaignPlan(JSON.stringify(plan()));
+
+  // 第一次:创建/验证全部成功,第 6 步启用被拒 → PARTIAL_FAILURE(远端可能实际已启用)
+  const first = new SuccessfulAdsClient();
+  first.request = async function (method, path, opts) {
+    if (method === 'PUT' && path === '/sp/campaigns') {
+      this.calls.push({ method, path, opts });
+      return { campaigns: { success: [], error: [{ code: 'THROTTLED' }] } };
+    }
+    return SuccessfulAdsClient.prototype.request.call(this, method, path, opts);
+  };
+  await assert.rejects(
+    executeKeywordCampaignPlan(first, parsed),
+    (error) => error instanceof AmzError && error.subtype === 'ads.keyword_campaign_partial_failure',
+  );
+
+  // 第二次续跑:远端 Campaign 实际已是 ENABLED,回读验证必须接受(否则永远卡死)
+  const resumed = new SuccessfulAdsClient();
+  resumed.createdAds = [{ campaignId: '1001', adGroupId: '2001', adId: '3001', sku: 'SKU-1', state: 'ENABLED' }];
+  resumed.request = async function (method, path, opts) {
+    if (method === 'POST' && path === '/sp/campaigns/list') {
+      this.calls.push({ method, path, opts });
+      return { campaigns: [{ campaignId: '1001', state: 'ENABLED' }] };
+    }
+    return SuccessfulAdsClient.prototype.request.call(this, method, path, opts);
+  };
+  const result = await executeKeywordCampaignPlan(resumed, parsed);
+  assert.equal(result.state, 'ENABLED');
+  assert.equal(result.journalStatus, 'ENABLED');
+  // 续跑不允许重新创建任何对象
+  assert.equal(resumed.calls.some(({ method, path }) => method === 'POST' && path === '/sp/campaigns'), false);
+  assert.equal(resumed.calls.some(({ method, path }) => method === 'POST' && path === '/sp/keywords'), false);
+});
+
 test('partial product-ad failure journals progress and resume submits only the missing product', async () => {
   isolatedState();
   const p = plan({ products: [{ sku: 'VARIANT-SKU-1' }, { sku: 'VARIANT-SKU-2' }] });

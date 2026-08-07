@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { aggregateAdsPerformance } from '../dist/shortcuts/ads/performance.js';
+import {
+  aggregateAdsPerformance,
+  buildAdsPerfRows,
+  filterAndSortAdsPerfRows,
+} from '../dist/shortcuts/ads/performance.js';
 
 // 两天明细,故意用能整除的数,避免浮点误差
 const rows = [
@@ -56,6 +60,28 @@ test('limit 截断,最差优先', () => {
   const out = aggregateAdsPerformance(rows, { by: 'campaign', minSpend: 0, limit: 1 });
   assert.equal(out.length, 1);
   assert.equal(out[0].campaignId, 'c2');
+});
+
+test('buildAdsPerfRows 返回全量(不过滤不截断),总体指标必须在这份全量上算', () => {
+  const all = buildAdsPerfRows(rows, 'campaign');
+  assert.equal(all.length, 3); // c1/c2/c3 全在,包含会被 minSpend/acosMin 筛掉的
+  const totalSpend = Math.round(all.reduce((s, r) => s + r.cost, 0) * 100) / 100;
+  const totalSales = Math.round(all.reduce((s, r) => s + r.sales, 0) * 100) / 100;
+  assert.equal(totalSpend, 20); // 10 + 8 + 2
+  assert.equal(totalSales, 42); // 40 + 0 + 2
+
+  // 同样口径下,过滤后的合计与全量合计不同——这正是要修的误导口径
+  const filtered = filterAndSortAdsPerfRows(all, { by: 'campaign', minSpend: 0, acosMin: 50 });
+  assert.deepEqual(filtered.map((r) => r.campaignId), ['c2', 'c3']);
+  const filteredSpend = filtered.reduce((s, r) => s + r.cost, 0);
+  assert.notEqual(filteredSpend, totalSpend);
+});
+
+test('filterAndSortAdsPerfRows 与 aggregateAdsPerformance(汇总+筛选)结果一致', () => {
+  const opts = { by: 'campaign', minSpend: 3, acosMin: 50, limit: 1 };
+  const viaSplit = filterAndSortAdsPerfRows(buildAdsPerfRows(rows, 'campaign'), opts);
+  const viaCombined = aggregateAdsPerformance(rows, opts);
+  assert.deepEqual(viaSplit, viaCombined);
 });
 
 test('by ad-group:同活动不同广告组分开汇总,带 adGroupId/Name', () => {

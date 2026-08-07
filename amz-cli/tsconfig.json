@@ -10,7 +10,9 @@
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
     "declaration": false,
-    "sourceMap": false
+    "sourceMap": false,
+    // 编译产物不带注释：dist/ 会随 npm 包分发，源码注释没有必要跟着发出去。
+    "removeComments": true
   },
   "include": ["src/**/*"]
 }

@@ -45,6 +45,10 @@ test('multi-store account env example is self-contained and has no Broker settin
     'ADS_CLIENT_SECRET',
     'ADS_REFRESH_TOKEN',
     'ADS_REGION',
+    // 代理配置:留空 = 直连,所以模板里三项都必须是空值。
+    'SP_API_PROXY',
+    'ADS_PROXY',
+    'EGRESS_LABEL',
   ]);
   assert.equal(account.SP_API_REGION, 'na');
   assert.equal(account.SP_API_SANDBOX, 'false');
@@ -82,18 +86,18 @@ test('loads shared Broker settings before switching STORE', () => {
   assert.equal(env.SELLER_ID, undefined);
 });
 
-test('账号名大小写不敏感:小写 cycayit 匹配 Cycayit.env 并归一到规范名', () => {
+test('账号名大小写不敏感:小写 shopa 匹配 ShopA.env 并归一到规范名', () => {
   const home = tempRoot();
   mkdirSync(join(home, '.amz-cli', 'accounts'), { recursive: true });
   writeFileSync(
-    join(home, '.amz-cli', 'accounts', 'Cycayit.env'),
-    'LWA_CLIENT_ID=cy-client\nSELLER_ID_NA=CY_SELLER\n',
+    join(home, '.amz-cli', 'accounts', 'ShopA.env'),
+    'LWA_CLIENT_ID=a-client\nSELLER_ID_NA=A_SELLER_X\n',
   );
   const env = {};
-  const canonical = loadAccount('cycayit', { env, home, stderr: () => {} });
-  assert.equal(canonical, 'Cycayit'); // 返回文件实际大小写(规范名),供审计/路由统一使用
-  assert.equal(env.LWA_CLIENT_ID, 'cy-client');
-  assert.equal(env.SELLER_ID_NA, 'CY_SELLER');
+  const canonical = loadAccount('shopa', { env, home, stderr: () => {} });
+  assert.equal(canonical, 'ShopA'); // 返回文件实际大小写(规范名),供审计/路由统一使用
+  assert.equal(env.LWA_CLIENT_ID, 'a-client');
+  assert.equal(env.SELLER_ID_NA, 'A_SELLER_X');
 });
 
 test('精确大小写仍然优先命中,返回原名', () => {
@@ -103,6 +107,69 @@ test('精确大小写仍然优先命中,返回原名', () => {
   const env = {};
   assert.equal(loadAccount('A', { env, home, stderr: () => {} }), 'A');
   assert.equal(env.SELLER_ID_NA, 'A_SELLER');
+});
+
+test('切换账号时清空上一个账号的代理配置,不会串到下一个', () => {
+  const home = tempRoot();
+  const dir = join(home, '.amz-cli', 'accounts');
+  mkdirSync(dir, { recursive: true });
+  // A 配了代理;B 是"就要直连"的账号,故意不配
+  writeFileSync(
+    join(dir, 'ShopA.env'),
+    'SELLER_ID_NA=A\nSP_API_PROXY=http://u:p@1.1.1.1:38128\nADS_PROXY=http://u:p@2.2.2.2:38128\nEGRESS_LABEL=shop-a\n',
+  );
+  writeFileSync(join(dir, 'ShopB.env'), 'SELLER_ID_NA=B\n');
+
+  const env = {};
+  loadAccount('ShopA', { env, home, stderr: () => {} });
+  assert.equal(env.SP_API_PROXY, 'http://u:p@1.1.1.1:38128');
+  assert.equal(env.EGRESS_LABEL, 'shop-a');
+
+  // 切到 B:三项都必须被清掉,否则 B 会用上 A 的代理
+  loadAccount('ShopB', { env, home, stderr: () => {} });
+  assert.equal(env.SELLER_ID_NA, 'B');
+  assert.equal(env.SP_API_PROXY, undefined, 'A 的代理串到了 B');
+  assert.equal(env.ADS_PROXY, undefined, 'A 的广告代理串到了 B');
+  assert.equal(env.EGRESS_LABEL, undefined, 'A 的出口标签串到了 B');
+});
+
+test('切换账号时清空区域/沙盒/UA 设置,账号文件省略的项落回默认而不是继承', () => {
+  const home = tempRoot();
+  const dir = join(home, '.amz-cli', 'accounts');
+  mkdirSync(dir, { recursive: true });
+  // A 开了沙盒、配了自己的区域和 UA;B 的文件省略了这些行
+  writeFileSync(
+    join(dir, 'ShopA.env'),
+    'SELLER_ID_NA=A\nSP_API_SANDBOX=true\nSP_API_REGION=eu\nADS_REGION=eu\n' +
+      'SP_API_USER_AGENT=AppA/1.0\nADS_USER_AGENT=AppA-Ads/1.0\n',
+  );
+  writeFileSync(join(dir, 'ShopB.env'), 'SELLER_ID_NA=B\n');
+
+  const env = {};
+  loadAccount('ShopA', { env, home, stderr: () => {} });
+  assert.equal(env.SP_API_SANDBOX, 'true');
+
+  // 切到 B:最危险的是 SP_API_SANDBOX 残留 —— B 的请求会整个打到沙盒
+  loadAccount('ShopB', { env, home, stderr: () => {} });
+  assert.equal(env.SELLER_ID_NA, 'B');
+  assert.equal(env.SP_API_SANDBOX, undefined, 'A 的沙盒开关串到了 B');
+  assert.equal(env.SP_API_REGION, undefined, 'A 的区域串到了 B');
+  assert.equal(env.ADS_REGION, undefined, 'A 的广告区域串到了 B');
+  assert.equal(env.SP_API_USER_AGENT, undefined, 'A 的 UA 串到了 B');
+  assert.equal(env.ADS_USER_AGENT, undefined, 'A 的广告 UA 串到了 B');
+});
+
+test('共享 .env 里误配的代理不会污染指定账号', () => {
+  const home = tempRoot();
+  const dir = join(home, '.amz-cli', 'accounts');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'DirectShop.env'), 'SELLER_ID_NA=D\n');
+
+  // 管理员手滑把代理写进了共享配置/系统环境变量
+  const env = { SP_API_PROXY: 'http://oops:p@9.9.9.9:38128', EGRESS_LABEL: 'wrong' };
+  loadAccount('DirectShop', { env, home, stderr: () => {} });
+  assert.equal(env.SP_API_PROXY, undefined, '共享配置的代理污染了本该直连的账号');
+  assert.equal(env.EGRESS_LABEL, undefined);
 });
 
 test('falls back to the user config when cwd has no amz-cli settings', () => {

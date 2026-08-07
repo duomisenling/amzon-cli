@@ -1,14 +1,14 @@
-// User-Agent 解析 —— 按主体(账号)可配,避免"一份代码 5 个主体发同一个 UA"的应用层指纹。
+// User-Agent 解析 —— 按账号可配。
 //
 // SP-API 要求请求带 User-Agent,推荐格式:AppName/Version (Language=...; Platform=...)。
-// 每个主体在自己的 accounts/<店铺>.env 里设 SP_API_USER_AGENT(和可选 ADS_USER_AGENT),
-// 对应各自注册的 app 名字与版本号 —— 5 个主体 = 5 个各自独立、都说得通的 UA。
+// 在 accounts/<账号>.env 里设 SP_API_USER_AGENT(和可选 ADS_USER_AGENT),
+// 填该账号所用应用在开发者中心注册的名字与版本号,让请求头与注册信息一致。
 //
-// 未配置时回退到一个通用默认(仍建议每个主体各配一份,默认值会让未配置的主体撞在一起)。
+// 未配置时回退到一个通用默认(建议按账号各配一份,填各自的应用名)。
 
 const DEFAULT_UA = 'amz-cli (Language=Node.js)';
 
-/** SP-API 请求用的 User-Agent。优先各主体 .env 的 SP_API_USER_AGENT。 */
+/** SP-API 请求用的 User-Agent。优先该账号 .env 的 SP_API_USER_AGENT。 */
 export function spApiUserAgent(): string {
   const custom = process.env['SP_API_USER_AGENT']?.trim();
   return custom && custom.length > 0 ? custom : DEFAULT_UA;
@@ -16,6 +16,9 @@ export function spApiUserAgent(): string {
 
 /** Ads API 请求用的 User-Agent。优先 ADS_USER_AGENT,其次 SP_API_USER_AGENT。 */
 export function adsUserAgent(): string {
-  const custom = (process.env['ADS_USER_AGENT'] ?? process.env['SP_API_USER_AGENT'])?.trim();
-  return custom && custom.length > 0 ? custom : DEFAULT_UA;
+  // 逐级判空:ADS_USER_AGENT 设了但为空串/空白时也要回退到 SP_API_USER_AGENT,
+  // 与模板"留空则复用"的承诺一致(?? 只认 undefined,空串会短路)。
+  const ads = process.env['ADS_USER_AGENT']?.trim();
+  if (ads) return ads;
+  return spApiUserAgent();
 }

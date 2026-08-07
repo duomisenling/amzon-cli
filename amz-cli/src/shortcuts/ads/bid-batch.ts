@@ -21,12 +21,15 @@ import {
   adsRegion,
   adsResponseGroup,
   requireProfileId,
+  round2,
 } from './common.js';
 
 /** 单次批量上限:限制一次审批覆盖的写入量(项目决策:一次最多 100 条),过大拆多次跑。 */
 export const MAX_BID_BATCH = 100;
 /** 每次 PUT 的分片大小(与批量上限一致,单批一次写完)。 */
 const PUT_CHUNK = 100;
+/** list 翻页熔断上限(照 campaign-extend listAll 的写法,防 nextToken 死循环)。 */
+const MAX_LIST_PAGES = 100;
 
 export interface BidChange {
   keywordId: string;
@@ -40,7 +43,7 @@ export interface CurrentKeyword {
   keywordText?: string;
 }
 
-export type BidRowStatus = 'change' | 'no-change' | 'not-found';
+export type BidRowStatus = 'change' | 'no-change' | 'not-found' | 'not-applicable';
 
 export interface BidPlanRow {
   keywordId: string;
@@ -49,6 +52,8 @@ export interface BidPlanRow {
   currentBid?: number;
   newBid: number;
   status: BidRowStatus;
+  /** 仅 not-applicable 时给出原因(如已归档)。 */
+  reason?: string;
 }
 
 export interface BidPlan {
@@ -56,10 +61,8 @@ export interface BidPlan {
   willChange: BidChange[];
   noChange: BidChange[];
   notFound: BidChange[];
-}
-
-function round2(v: number): number {
-  return Math.round(v * 100) / 100;
+  /** 当前已 ARCHIVED 的关键词:归档不可逆,执行必被拒,预览就剔除,不进 willChange。 */
+  notApplicable: BidChange[];
 }
 
 function invalid(subtype: string, hintHuman: string, message: string, param?: string): AmzError {
@@ -117,8 +120,9 @@ export function parseBidChanges(raw: unknown): BidChange[] {
 }
 
 /**
- * 纯函数:把目标竞价和远端当前竞价对齐成 before→after,分出真正要改 / 无变化 / 找不到。
- * currentBid === newBid(两位小数)判为 no-change;远端缺该关键词判为 not-found。
+ * 纯函数:把目标竞价和远端当前竞价对齐成 before→after,分出真正要改 / 无变化 / 找不到 / 不可操作。
+ * currentBid === newBid(两位小数)判为 no-change;远端缺该关键词判为 not-found;
+ * 当前 ARCHIVED 判为 not-applicable(归档不可逆,执行必被拒,预览就剔除)。
  */
 export function planBidChanges(changes: BidChange[], current: CurrentKeyword[]): BidPlan {
   const byId = new Map<string, CurrentKeyword>();
@@ -128,6 +132,7 @@ export function planBidChanges(changes: BidChange[], current: CurrentKeyword[]):
   const willChange: BidChange[] = [];
   const noChange: BidChange[] = [];
   const notFound: BidChange[] = [];
+  const notApplicable: BidChange[] = [];
 
   for (const ch of changes) {
     const cur = byId.get(ch.keywordId);
@@ -145,7 +150,11 @@ export function planBidChanges(changes: BidChange[], current: CurrentKeyword[]):
       newBid: ch.bid,
       status: 'change',
     };
-    if (currentBid === ch.bid) {
+    if (cur.state != null && String(cur.state).toUpperCase() === 'ARCHIVED') {
+      base.status = 'not-applicable';
+      base.reason = '关键词已归档(ARCHIVED 不可逆),无法修改竞价';
+      notApplicable.push(ch);
+    } else if (currentBid === ch.bid) {
       base.status = 'no-change';
       noChange.push(ch);
     } else {
@@ -153,7 +162,7 @@ export function planBidChanges(changes: BidChange[], current: CurrentKeyword[]):
     }
     rows.push(base);
   }
-  return { rows, willChange, noChange, notFound };
+  return { rows, willChange, noChange, notFound, notApplicable };
 }
 
 function chunk<T>(arr: T[], size: number): T[][] {
@@ -194,8 +203,12 @@ function asCurrentArray(value: unknown): CurrentKeyword[] {
   return Array.isArray(value) ? (value as CurrentKeyword[]) : [];
 }
 
-/** 批量读当前关键词竞价(按 100 分片查 keywordIdFilter,合并并按 id 排序)。 */
-async function fetchCurrentKeywords(
+/**
+ * 批量读当前关键词竞价(按 100 分片查 keywordIdFilter,合并并按 id 排序)。
+ * 每片带 maxResults 并处理 nextToken 翻页(带页数熔断):否则接近 100 条时
+ * 后续关键词会被误判 not-found 而静默跳过。导出仅为单测。
+ */
+export async function fetchCurrentKeywords(
   client: AdsClient,
   profileId: string,
   ids: string[],
@@ -203,19 +216,41 @@ async function fetchCurrentKeywords(
 ): Promise<CurrentKeyword[]> {
   const out: CurrentKeyword[] = [];
   for (const idChunk of chunk(ids, PUT_CHUNK)) {
-    const resp = (await client.request('POST', '/sp/keywords/list', {
-      profileId,
-      region,
-      contentType: ADS_CONTENT_TYPES.spKeyword,
-      retry5xx: true,
-      body: { keywordIdFilter: { include: idChunk }, maxResults: idChunk.length },
-    })) as { keywords?: Array<Record<string, unknown>> } | null;
-    for (const k of resp?.keywords ?? []) {
-      out.push({
-        keywordId: String(k['keywordId']),
-        bid: k['bid'] != null ? Number(k['bid']) : undefined,
-        state: k['state'] != null ? String(k['state']) : undefined,
-        keywordText: k['keywordText'] != null ? String(k['keywordText']) : undefined,
+    let nextToken: string | undefined;
+    let exhausted = false;
+    for (let page = 0; page < MAX_LIST_PAGES; page += 1) {
+      const resp = (await client.request('POST', '/sp/keywords/list', {
+        profileId,
+        region,
+        contentType: ADS_CONTENT_TYPES.spKeyword,
+        retry5xx: true,
+        body: {
+          keywordIdFilter: { include: idChunk },
+          maxResults: idChunk.length,
+          ...(nextToken ? { nextToken } : {}),
+        },
+      })) as { keywords?: Array<Record<string, unknown>>; nextToken?: string } | null;
+      for (const k of resp?.keywords ?? []) {
+        out.push({
+          keywordId: String(k['keywordId']),
+          bid: k['bid'] != null ? Number(k['bid']) : undefined,
+          state: k['state'] != null ? String(k['state']) : undefined,
+          keywordText: k['keywordText'] != null ? String(k['keywordText']) : undefined,
+        });
+      }
+      nextToken = typeof resp?.nextToken === 'string' && resp.nextToken ? resp.nextToken : undefined;
+      if (!nextToken) {
+        exhausted = true;
+        break;
+      }
+    }
+    if (!exhausted) {
+      throw new AmzError({
+        type: 'upstream_error',
+        subtype: 'ads.bid_batch_pagination_limit',
+        hintAgent: 'report_to_human',
+        hintHuman: '读取当前关键词竞价时分页超过安全上限,已停止,未执行任何写入。',
+        message: `bid-batch keyword list pagination exceeded ${MAX_LIST_PAGES} pages`,
       });
     }
   }
@@ -261,9 +296,9 @@ export const adsBidBatch: ToolDefinition = {
         subtype: 'ads.bid_batch_no_change',
         hintAgent: 'report_to_human',
         hintHuman:
-          `清单里没有需要实际修改的关键词(无变化 ${plan.noChange.length} 个、找不到 ${plan.notFound.length} 个),不签发确认令牌。` +
+          `清单里没有需要实际修改的关键词(无变化 ${plan.noChange.length} 个、找不到 ${plan.notFound.length} 个、已归档 ${plan.notApplicable.length} 个),不签发确认令牌。` +
           '请核对 keywordId 和目标竞价。',
-        message: `bid-batch produced no effective change (noChange=${plan.noChange.length}, notFound=${plan.notFound.length})`,
+        message: `bid-batch produced no effective change (noChange=${plan.noChange.length}, notFound=${plan.notFound.length}, notApplicable=${plan.notApplicable.length})`,
       });
     }
     return {
@@ -272,6 +307,10 @@ export const adsBidBatch: ToolDefinition = {
       willChange: plan.willChange.length,
       noChange: plan.noChange.length,
       notFound: plan.notFound.length,
+      notApplicable: plan.notApplicable.length,
+      ...(plan.notApplicable.length > 0
+        ? { not_applicable_note: '已归档(ARCHIVED)的关键词不可逆、无法改竞价,已从执行清单剔除。' }
+        : {}),
       rows: plan.rows,
     };
   },
@@ -286,6 +325,9 @@ export const adsBidBatch: ToolDefinition = {
 
     const applied: Array<{ keywordId: string; bid: number }> = [];
     const failed: Array<{ keywordId: string; reason: string }> = [];
+    // 结果不明 ≠ 失败:网络中断(write_result_unknown)或响应形状未知时,写入可能已生效,
+    // 与确定性失败分开统计,防止被当成"失败"直接重跑。
+    const resultUnknown: Array<{ keywordId: string; reason: string }> = [];
 
     for (const part of chunk(toApply, PUT_CHUNK)) {
       ctx.progress(`· 正在写入 ${applied.length + part.length}/${toApply.length} 个竞价...`);
@@ -300,7 +342,7 @@ export const adsBidBatch: ToolDefinition = {
         const group = adsResponseGroup(resp, 'keywords');
         if (!group.known) {
           // 响应形状未知:不武断判成功也不判失败,如实标出待人工核对
-          for (const c of part) failed.push({ keywordId: c.keywordId, reason: 'UNKNOWN_RESPONSE_SHAPE' });
+          for (const c of part) resultUnknown.push({ keywordId: c.keywordId, reason: 'UNKNOWN_RESPONSE_SHAPE' });
           continue;
         }
         const okIds = new Set(group.success.map((s) => String(s['keywordId'])));
@@ -309,9 +351,12 @@ export const adsBidBatch: ToolDefinition = {
           else failed.push({ keywordId: c.keywordId, reason: 'REJECTED_BY_AMAZON' });
         }
       } catch (err) {
-        // 整片请求失败(如网络):该片全部计为失败,继续下一片,不中断整批
-        const reason = err instanceof Error ? err.message : String(err);
-        for (const c of part) failed.push({ keywordId: c.keywordId, reason: reason.slice(0, 200) });
+        // 整片请求失败:确定未发出/被拒的计入 failed;结果不明(可能已生效)单独计入 resultUnknown。
+        // 两种情况都继续下一片,不中断整批。
+        const ambiguous = err instanceof AmzError && err.subtype === 'ads.write_result_unknown';
+        const reason = (err instanceof Error ? err.message : String(err)).slice(0, 200);
+        const bucket = ambiguous ? resultUnknown : failed;
+        for (const c of part) bucket.push({ keywordId: c.keywordId, reason });
       }
     }
 
@@ -321,10 +366,20 @@ export const adsBidBatch: ToolDefinition = {
       attempted: toApply.length,
       appliedCount: applied.length,
       failedCount: failed.length,
+      resultUnknownCount: resultUnknown.length,
       noChange: plan.noChange.length,
       notFound: plan.notFound.length,
+      notApplicable: plan.notApplicable.length,
       applied,
       ...(failed.length > 0 ? { failed } : {}),
+      ...(resultUnknown.length > 0 ? { resultUnknown } : {}),
+      ...(resultUnknown.length > 0
+        ? {
+            result_unknown_note:
+              '⚠️ resultUnknown 中的关键词写入结果不明(网络中断或响应无法识别),竞价可能已经改成功。' +
+              '不要直接重跑;请先用 ads keywords 或广告后台核对当前竞价,再决定是否重新预览。',
+          }
+        : {}),
       ...(failed.length > 0
         ? {
             note:

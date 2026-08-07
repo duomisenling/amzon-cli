@@ -20,6 +20,7 @@ import {
   requireCampaignId,
   requirePositiveAmount,
   requireProfileId,
+  round2,
   verifyAfterWrite,
 } from './common.js';
 
@@ -81,7 +82,8 @@ export const adsCampaignBudget: ToolDefinition = {
   dryRun: async (ctx) => {
     const profileId = requireProfileId(ctx.flags);
     const campaignId = requireCampaignId(ctx.flags);
-    const newBudget = requirePositiveAmount(ctx.flags, 'dailyBudget', '--daily-budget');
+    // 写入与比较都按两位小数归一:0.855 这类值若不归一,回读比较必然 mismatch
+    const newBudget = round2(requirePositiveAmount(ctx.flags, 'dailyBudget', '--daily-budget'));
 
     ctx.progress('· 已查询当前预算做对照...');
     const current = recordFromContext(ctx.confirmationState);
@@ -96,7 +98,7 @@ export const adsCampaignBudget: ToolDefinition = {
       });
     }
     const currentBudget = (current['budget'] as Record<string, unknown> | undefined)?.['budget'];
-    assertChangeNeeded(Number(currentBudget), newBudget, '日预算');
+    assertChangeNeeded(round2(Number(currentBudget)), newBudget, '日预算');
     return {
       dry_run_note: '请人工核对以下预算改动;确认后凭本次预览令牌执行正式写入。',
       campaign: { id: campaignId, name: current['name'], state: current['state'] },
@@ -110,7 +112,8 @@ export const adsCampaignBudget: ToolDefinition = {
   execute: async (ctx) => {
     const profileId = requireProfileId(ctx.flags);
     const campaignId = requireCampaignId(ctx.flags);
-    const newBudget = requirePositiveAmount(ctx.flags, 'dailyBudget', '--daily-budget');
+    // 与 dry-run 同口径:写入值两位小数归一,回读比较也用归一后的值
+    const newBudget = round2(requirePositiveAmount(ctx.flags, 'dailyBudget', '--daily-budget'));
     ctx.progress('· 正在修改日预算...');
     const resp = await ctx.adsClient.request('PUT', '/sp/campaigns', {
       profileId,
@@ -124,7 +127,7 @@ export const adsCampaignBudget: ToolDefinition = {
     assertAdsWriteAccepted(resp, 'campaigns', '预算修改');
     const verification = await verifyAfterWrite(
       () => fetchCampaign(ctx.adsClient, profileId, campaignId, adsRegion(ctx.flags)),
-      (record) => Number((record['budget'] as Record<string, unknown> | undefined)?.['budget']) === newBudget,
+      (record) => round2(Number((record['budget'] as Record<string, unknown> | undefined)?.['budget'])) === newBudget,
       '即时回读未确认新预算。不要自动重试写入，请稍后只读查询或到广告后台核对。',
     );
     return { result: resp, ...verification };

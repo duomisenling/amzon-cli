@@ -14,11 +14,13 @@ import { AmzError } from '../../internal/errs/errors.js';
 import { AdsClient, ADS_CONTENT_TYPES } from '../../internal/client/ads-client.js';
 import type { ToolDefinition } from '../../tools/types.js';
 import { strFlag } from '../common.js';
-import { ADS_REGION_FLAG, adsRegion, adsResponseGroup, requireProfileId } from './common.js';
+import { ADS_REGION_FLAG, adsRegion, adsResponseGroup, requireProfileId, round2 } from './common.js';
 
 /** 单次批量上限(项目决策:一次最多 100 条)。 */
 export const MAX_BUDGET_BATCH = 100;
 const PUT_CHUNK = 100;
+/** list 翻页熔断上限(照 campaign-extend listAll 的写法,防 nextToken 死循环)。 */
+const MAX_LIST_PAGES = 100;
 
 export interface BudgetChange {
   campaignId: string;
@@ -46,10 +48,6 @@ export interface BudgetPlan {
   willChange: BudgetChange[];
   noChange: BudgetChange[];
   notFound: BudgetChange[];
-}
-
-function round2(v: number): number {
-  return Math.round(v * 100) / 100;
 }
 
 function invalid(subtype: string, hintHuman: string, message: string, param?: string): AmzError {
@@ -173,8 +171,12 @@ function asCurrentArray(value: unknown): CurrentCampaignBudget[] {
   return Array.isArray(value) ? (value as CurrentCampaignBudget[]) : [];
 }
 
-/** 批量读当前 campaign 日预算(按 100 分片查 campaignIdFilter,合并并排序)。 */
-async function fetchCurrentBudgets(
+/**
+ * 批量读当前 campaign 日预算(按 100 分片查 campaignIdFilter,合并并排序)。
+ * 每片带 maxResults 并处理 nextToken 翻页(带页数熔断):否则接近 100 条时
+ * 后续 campaign 会被误判 not-found 而静默跳过。导出仅为单测。
+ */
+export async function fetchCurrentBudgets(
   client: AdsClient,
   profileId: string,
   ids: string[],
@@ -182,20 +184,42 @@ async function fetchCurrentBudgets(
 ): Promise<CurrentCampaignBudget[]> {
   const out: CurrentCampaignBudget[] = [];
   for (const idChunk of chunk(ids, PUT_CHUNK)) {
-    const resp = (await client.request('POST', '/sp/campaigns/list', {
-      profileId,
-      region,
-      contentType: ADS_CONTENT_TYPES.spCampaign,
-      retry5xx: true,
-      body: { campaignIdFilter: { include: idChunk } },
-    })) as { campaigns?: Array<Record<string, unknown>> } | null;
-    for (const c of resp?.campaigns ?? []) {
-      const budgetObj = c['budget'] as Record<string, unknown> | undefined;
-      const dailyBudget = budgetObj?.['budget'] != null ? Number(budgetObj['budget']) : undefined;
-      out.push({
-        campaignId: String(c['campaignId']),
-        dailyBudget,
-        name: c['name'] != null ? String(c['name']) : undefined,
+    let nextToken: string | undefined;
+    let exhausted = false;
+    for (let page = 0; page < MAX_LIST_PAGES; page += 1) {
+      const resp = (await client.request('POST', '/sp/campaigns/list', {
+        profileId,
+        region,
+        contentType: ADS_CONTENT_TYPES.spCampaign,
+        retry5xx: true,
+        body: {
+          campaignIdFilter: { include: idChunk },
+          maxResults: idChunk.length,
+          ...(nextToken ? { nextToken } : {}),
+        },
+      })) as { campaigns?: Array<Record<string, unknown>>; nextToken?: string } | null;
+      for (const c of resp?.campaigns ?? []) {
+        const budgetObj = c['budget'] as Record<string, unknown> | undefined;
+        const dailyBudget = budgetObj?.['budget'] != null ? Number(budgetObj['budget']) : undefined;
+        out.push({
+          campaignId: String(c['campaignId']),
+          dailyBudget,
+          name: c['name'] != null ? String(c['name']) : undefined,
+        });
+      }
+      nextToken = typeof resp?.nextToken === 'string' && resp.nextToken ? resp.nextToken : undefined;
+      if (!nextToken) {
+        exhausted = true;
+        break;
+      }
+    }
+    if (!exhausted) {
+      throw new AmzError({
+        type: 'upstream_error',
+        subtype: 'ads.budget_batch_pagination_limit',
+        hintAgent: 'report_to_human',
+        hintHuman: '读取当前广告活动预算时分页超过安全上限,已停止,未执行任何写入。',
+        message: `budget-batch campaign list pagination exceeded ${MAX_LIST_PAGES} pages`,
       });
     }
   }
@@ -264,6 +288,9 @@ export const adsBudgetBatch: ToolDefinition = {
 
     const applied: Array<{ campaignId: string; dailyBudget: number }> = [];
     const failed: Array<{ campaignId: string; reason: string }> = [];
+    // 结果不明 ≠ 失败:网络中断(write_result_unknown)或响应形状未知时,写入可能已生效,
+    // 与确定性失败分开统计,防止被当成"失败"直接重跑。
+    const resultUnknown: Array<{ campaignId: string; reason: string }> = [];
 
     for (const part of chunk(toApply, PUT_CHUNK)) {
       ctx.progress(`· 正在写入 ${applied.length + part.length}/${toApply.length} 个预算...`);
@@ -279,7 +306,7 @@ export const adsBudgetBatch: ToolDefinition = {
         });
         const group = adsResponseGroup(resp, 'campaigns');
         if (!group.known) {
-          for (const c of part) failed.push({ campaignId: c.campaignId, reason: 'UNKNOWN_RESPONSE_SHAPE' });
+          for (const c of part) resultUnknown.push({ campaignId: c.campaignId, reason: 'UNKNOWN_RESPONSE_SHAPE' });
           continue;
         }
         const okIds = new Set(group.success.map((s) => String(s['campaignId'])));
@@ -288,8 +315,11 @@ export const adsBudgetBatch: ToolDefinition = {
           else failed.push({ campaignId: c.campaignId, reason: 'REJECTED_BY_AMAZON' });
         }
       } catch (err) {
-        const reason = err instanceof Error ? err.message : String(err);
-        for (const c of part) failed.push({ campaignId: c.campaignId, reason: reason.slice(0, 200) });
+        // 确定未发出/被拒的计入 failed;结果不明(可能已生效)单独计入 resultUnknown。
+        const ambiguous = err instanceof AmzError && err.subtype === 'ads.write_result_unknown';
+        const reason = (err instanceof Error ? err.message : String(err)).slice(0, 200);
+        const bucket = ambiguous ? resultUnknown : failed;
+        for (const c of part) bucket.push({ campaignId: c.campaignId, reason });
       }
     }
 
@@ -299,10 +329,19 @@ export const adsBudgetBatch: ToolDefinition = {
       attempted: toApply.length,
       appliedCount: applied.length,
       failedCount: failed.length,
+      resultUnknownCount: resultUnknown.length,
       noChange: plan.noChange.length,
       notFound: plan.notFound.length,
       applied,
       ...(failed.length > 0 ? { failed } : {}),
+      ...(resultUnknown.length > 0 ? { resultUnknown } : {}),
+      ...(resultUnknown.length > 0
+        ? {
+            result_unknown_note:
+              '⚠️ resultUnknown 中的广告活动写入结果不明(网络中断或响应无法识别),预算可能已经改成功。' +
+              '不要直接重跑;请先用 ads campaigns 或广告后台核对当前预算,再决定是否重新预览。',
+          }
+        : {}),
       ...(failed.length > 0
         ? { note: '部分广告活动未成功(见 failed)。不要自动重试整批;只对失败项重新预览或到后台核对。' }
         : {}),

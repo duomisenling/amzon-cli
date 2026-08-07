@@ -5,6 +5,7 @@
 //   2. 把失败结果包装成各自语境的 AmzError(错误文案不同,机制相同)
 
 import { LWA_TOKEN_URL } from '../client/regions.js';
+import { amazonFetch, type EgressChannel } from '../net/egress.js';
 
 export interface LwaTokenResult {
   ok: true;
@@ -20,23 +21,35 @@ export interface LwaTokenFailure {
   body: Record<string, unknown>;
 }
 
-/** 用 refresh_token 换 access_token;网络错误原样抛出(由调用方分类包装)。 */
-export async function exchangeLwaToken(creds: {
-  clientId: string;
-  clientSecret: string;
-  refreshToken: string;
-}): Promise<LwaTokenResult | LwaTokenFailure> {
-  const resp = await fetch(LWA_TOKEN_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({
-      grant_type: 'refresh_token',
-      refresh_token: creds.refreshToken,
-      client_id: creds.clientId,
-      client_secret: creds.clientSecret,
-    }),
-    signal: AbortSignal.timeout(30_000),
-  });
+/**
+ * 用 refresh_token 换 access_token;网络错误原样抛出(由调用方分类包装)。
+ *
+ * channel 决定走哪个代理。这一步同样打的是亚马逊(api.amazon.com),
+ * 与业务请求走同一个出口,避免两者来源不一致。
+ */
+export async function exchangeLwaToken(
+  creds: {
+    clientId: string;
+    clientSecret: string;
+    refreshToken: string;
+  },
+  channel: EgressChannel = 'sp',
+): Promise<LwaTokenResult | LwaTokenFailure> {
+  const resp = await amazonFetch(
+    LWA_TOKEN_URL,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type: 'refresh_token',
+        refresh_token: creds.refreshToken,
+        client_id: creds.clientId,
+        client_secret: creds.clientSecret,
+      }).toString(),
+      signal: AbortSignal.timeout(30_000),
+    },
+    channel,
+  );
   const body = (await resp.json().catch(() => ({}))) as Record<string, unknown>;
   if (!resp.ok || typeof body.access_token !== 'string') {
     return { ok: false, status: resp.status, body };

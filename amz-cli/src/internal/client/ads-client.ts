@@ -18,6 +18,7 @@
 import { AmzError } from '../errs/errors.js';
 import { auditLog } from '../audit.js';
 import { adsUserAgent } from '../user-agent.js';
+import { amazonFetch } from '../net/egress.js';
 import { progress } from '../errs/output.js';
 import { exchangeLwaToken } from '../credential/lwa.js';
 import { brokerConfigFromEnv, mintFromBroker } from '../credential/broker.js';
@@ -121,7 +122,8 @@ export class AdsClient {
     }
 
     const c = resolveAdsCreds();
-    const result = await exchangeLwaToken(c);
+    // 令牌兑换与业务请求走同一个出口,避免两者来源不一致
+    const result = await exchangeLwaToken(c, 'ads');
     if (!result.ok) {
       throw new AmzError({
         type: 'auth_expired',
@@ -130,7 +132,7 @@ export class AdsClient {
         hintHuman:
           '广告 API 换取令牌失败。最常见原因:当前 refresh token 没有广告权限' +
           '(advertising::campaign_management)——广告 API 需要单独申请准入并重新授权。',
-        message: `Ads LWA exchange failed: HTTP ${result.status} ${JSON.stringify(result.body)}`,
+        message: `Ads LWA exchange failed: HTTP ${result.status} ${JSON.stringify(result.body).slice(0, 2000)}`,
         status: result.status,
       });
     }
@@ -166,7 +168,7 @@ export class AdsClient {
       const headers: Record<string, string> = {
         'Amazon-Advertising-API-ClientId': auth.clientId,
         Authorization: `Bearer ${auth.token}`,
-        // 按主体可配的 User-Agent(见 user-agent.ts)
+        // 按账号可配的 User-Agent(见 user-agent.ts)
         'User-Agent': adsUserAgent(),
         ...(opts.extraHeaders ?? {}),
       };
@@ -178,12 +180,20 @@ export class AdsClient {
         headers['Content-Type'] = 'application/json';
       }
 
-      const resp = await fetch(new URL(path, auth.endpoint), {
-        method,
-        headers,
-        body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
-        signal: AbortSignal.timeout(60_000),
-      }).catch((err: unknown) => {
+      // 按账号配置的代理发出(ADS_PROXY,留空则复用 SP_API_PROXY;都没配 = 直连)
+      const resp = await amazonFetch(
+        new URL(path, auth.endpoint),
+        {
+          method,
+          headers,
+          body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
+          signal: AbortSignal.timeout(60_000),
+        },
+        'ads',
+      ).catch((err: unknown) => {
+        // 代理配置错误在发出任何字节之前就抛出,是 AmzError。原样上抛:
+        // 包装成 write_result_unknown 会误导用户去核对一次根本没发出的写入。
+        if (err instanceof AmzError) throw err;
         if (!replaySafe) {
           throw new AmzError({
             type: 'upstream_error',
@@ -208,9 +218,45 @@ export class AdsClient {
       });
 
       if (resp.ok) {
+        if (resp.status === 204) {
+          auditLog({ api: 'ads', method, path, region: opts.region, status: resp.status, ok: true });
+          return null;
+        }
+        // 2xx 状态行已收到,但读 body 时超时/连接中断对写请求同样意味着"结果未知,
+        // 不得重试"。成功审计等 body 读完才记,避免 ok:true 却实际抛错的矛盾底账。
+        let text: string;
+        try {
+          text = await resp.text();
+        } catch (err) {
+          const classified = !replaySafe
+            ? new AmzError({
+                type: 'upstream_error',
+                subtype: 'ads.write_result_unknown',
+                hintAgent: 'report_to_human',
+                hintHuman:
+                  `Amazon Ads 已对 ${method.toUpperCase()} 写请求返回 HTTP ${resp.status}，但读取响应内容时网络中断。` +
+                  '写入结果可能已经生效；不要重试，请先查询广告后台核对。',
+                message: `Ads ${method.toUpperCase()} ${path} returned HTTP ${resp.status} but reading the body failed; write result is ambiguous: ${err instanceof Error ? err.message : String(err)}`,
+                status: resp.status,
+                cause: err,
+              })
+            : new AmzError({
+                type: 'upstream_error',
+                subtype: 'ads.network_error',
+                hintAgent: 'backoff_and_retry',
+                hintHuman: '读取广告接口响应时网络中断,请稍后重试。',
+                message: `reading Ads response body of ${path} failed after HTTP ${resp.status}: ${err instanceof Error ? err.message : String(err)}`,
+                status: resp.status,
+                retryable: true,
+                cause: err,
+              });
+          auditLog({
+            api: 'ads', method, path, region: opts.region, status: resp.status, ok: false,
+            errorSubtype: classified.subtype,
+          });
+          throw classified;
+        }
         auditLog({ api: 'ads', method, path, region: opts.region, status: resp.status, ok: true });
-        if (resp.status === 204) return null;
-        const text = await resp.text();
         if (text.trim() === '') return null;
         try {
           return JSON.parse(text) as unknown;
@@ -254,7 +300,22 @@ export class AdsClient {
         api: 'ads', method, path, region: opts.region, status: resp.status, ok: false,
         errorSubtype: `ads.http_${resp.status}`,
       });
-      if (resp.status === 401 || resp.status === 403) {
+      // 401 与 403 语义不同,不能合并:401 是认证失败(token 失效/被吊销,重新授权
+      // 就能解决),403 才是准入/权限不足(要去控制台申请)。合并成一条"没有准入"会
+      // 把一次普通的 token 过期误导成去重新申请 API 准入。
+      if (resp.status === 401) {
+        throw new AmzError({
+          type: 'auth_expired',
+          subtype: 'ads.unauthorized',
+          hintAgent: 'reauthorize',
+          hintHuman:
+            '广告 API 认证失败(HTTP 401):access token 无效或已过期。' +
+            '请重新授权获取新的 refresh token;若刚重新授权仍失败,检查 ADS_CLIENT_ID/ADS_CLIENT_SECRET 是否与授权应用一致。',
+          message: `Ads API HTTP 401 on ${path}: ${text.slice(0, 800)}`,
+          status: resp.status,
+        });
+      }
+      if (resp.status === 403) {
         throw new AmzError({
           type: 'insufficient_scope',
           subtype: 'ads.access_denied',

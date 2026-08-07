@@ -98,6 +98,11 @@ export function requirePositiveAmount(
   return n;
 }
 
+/** 金额两位小数归一。写入值与回读比较必须走同一口径,否则 0.855 这类值必然 mismatch。 */
+export function round2(v: number): number {
+  return Math.round(v * 100) / 100;
+}
+
 export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }

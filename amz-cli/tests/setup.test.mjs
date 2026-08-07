@@ -158,6 +158,29 @@ test('MCP config generator creates one fixed-account service per store without c
   );
 });
 
+test('MCP 配置默认关闭正式写入,只有显式 --allow-writes 才开启', () => {
+  const root = tempRoot('mcp-write-gate');
+  const serverPath = join(root, 'mcp-server.js');
+  writeFileSync(serverPath, '// compiled server placeholder\n', 'utf8');
+
+  // 默认:任何人自助生成的配置都不能带开写权限,这是 mcp/common.ts 的安全承诺
+  const readOnly = createCherryMcpConfig(['shop-a'], { serverPath });
+  assert.equal(
+    readOnly.mcpServers['Amazon Safe Writes - shop-a'].env.AMZ_MCP_ALLOW_WRITES,
+    'false',
+    '未传 --allow-writes 生成的配置竟然默认开了写权限',
+  );
+  // 白名单照常写入,管理员确认后只需翻转一个开关
+  assert.ok(readOnly.mcpServers['Amazon Safe Writes - shop-a'].env.AMZ_MCP_ALLOWED_WRITES.length > 0);
+
+  // 管理员显式开启
+  const writable = createCherryMcpConfig(['shop-a'], { serverPath, allowWrites: true });
+  assert.equal(
+    writable.mcpServers['Amazon Safe Writes - shop-a'].env.AMZ_MCP_ALLOW_WRITES,
+    'true',
+  );
+});
+
 test('MCP config generator creates one combined service with an explicit account allowlist', () => {
   const root = tempRoot('mcp-combined');
   const serverPath = join(root, 'mcp-server.js');

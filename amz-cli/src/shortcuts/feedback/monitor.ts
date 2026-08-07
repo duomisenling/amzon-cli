@@ -5,9 +5,16 @@
 // 拿不到 4-5 星好评——这是亚马逊本身的限制,不是 CLI 的问题。
 // 报告是 TSV,列名由亚马逊定；输出前按官方字段定义删除 Rater Email。
 
+import { AmzError } from '../../internal/errs/errors.js';
 import type { ToolDefinition } from '../../tools/types.js';
 import { daysAgoIso, resolveMarketplace, strFlag, validateNumberFlag } from '../common.js';
-import { downloadReportDocument, parseReport, requestReport, waitForReport } from '../report/infra.js';
+import {
+  downloadReportDocument,
+  parseReport,
+  requestReport,
+  requireReportDocumentId,
+  waitForReport,
+} from '../report/infra.js';
 import { sanitizeReportText } from '../report/sanitize.js';
 
 export const feedbackRun: ToolDefinition = {
@@ -31,11 +38,27 @@ export const feedbackRun: ToolDefinition = {
     const days = Number(strFlag(ctx.flags, 'days') ?? 30);
     const start = daysAgoIso(days);
 
-    const reportId = await requestReport(ctx, 'GET_SELLER_FEEDBACK_DATA', mkt, {
-      dataStartTime: start,
-    });
-    const status = await waitForReport(ctx, reportId, Number(strFlag(ctx.flags, 'timeout') ?? 10), mkt.region);
-    const downloaded = await downloadReportDocument(ctx, status.reportDocumentId!, mkt.region);
+    let downloaded: string;
+    try {
+      const reportId = await requestReport(ctx, 'GET_SELLER_FEEDBACK_DATA', mkt, {
+        dataStartTime: start,
+      });
+      const status = await waitForReport(ctx, reportId, Number(strFlag(ctx.flags, 'timeout') ?? 10), mkt.region);
+      downloaded = await downloadReportDocument(ctx, requireReportDocumentId(status), mkt.region);
+    } catch (error) {
+      // 期间没有 1-3 星反馈时亚马逊会 CANCELLED——不是故障,当作"无差评中评"的正常结果
+      // (与 inventory aged/stranded 等同类报告命令的处理对齐)。
+      if (error instanceof AmzError && error.subtype === 'report.cancelled') {
+        return {
+          marketplace: mkt.country,
+          days,
+          note: `最近 ${days} 天没有 1-3 星反馈(报告为空)。注意此报告本身只含 1-3 星,拿不到好评。`,
+          totalRows: 0,
+          feedback: [],
+        };
+      }
+      throw error;
+    }
     const text = sanitizeReportText('GET_SELLER_FEEDBACK_DATA', downloaded);
     const parsed = parseReport(text, 1000);
 

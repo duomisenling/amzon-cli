@@ -10,6 +10,7 @@ import { readPackageInfo } from './internal/package-info.js';
 import { isSandboxMode } from './internal/client/regions.js';
 import { extractAccountArg, loadAccount, loadDotEnvIfPresent } from './internal/account.js';
 import { setAuditAccount, flushAuditUploads } from './internal/audit.js';
+import { closeEgressAgents } from './internal/net/egress.js';
 import { registerSetupCommands } from './setup/commands.js';
 import { registerTools } from './tools/registry.js';
 import { authWhoami } from './shortcuts/auth/whoami.js';
@@ -66,6 +67,7 @@ import { feesEstimate } from './shortcuts/fees/estimate.js';
 import { shipmentsList, shipmentsItems } from './shortcuts/shipments/list.js';
 import { aplusDocuments, aplusAsins, aplusCoverage } from './shortcuts/aplus/content.js';
 import { catalogBatch } from './shortcuts/catalog/batch.js';
+import { doctorEgress } from './shortcuts/doctor/egress.js';
 
 async function main(): Promise<void> {
   const packageInfo = readPackageInfo();
@@ -99,6 +101,8 @@ async function main(): Promise<void> {
   // 所有功能定义在这里挂载(一个功能 = shortcuts/ 下一个 ToolDefinition)
   registerTools(program, [
     authWhoami,
+    // 出口自检:确认这个账号的请求实际从哪个 IP 发出(出口变化不会报错)
+    doctorEgress,
     listingSearch,
     listingGet,
     listingMine,
@@ -173,6 +177,8 @@ async function main(): Promise<void> {
   } finally {
     // 命令结束(成功或失败)后,把本次运行的审计行一次性上报中央服务器(若配置)。
     await flushAuditUploads();
+    // 关掉代理连接池。不关的话进程不会退出 —— 命令看起来"跑完就卡住"。
+    await closeEgressAgents();
   }
 }
 

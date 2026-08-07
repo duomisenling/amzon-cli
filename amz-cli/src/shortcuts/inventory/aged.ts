@@ -15,16 +15,25 @@ import { runReportRows } from '../report/infra.js';
 
 type Row = Record<string, string>;
 
-// 库龄档(与报告真实列名对应,不重叠,合计=总库存)。lo=该档起始天数,用于按阈值取"更老的档"。
-const AGE_BUCKETS: Array<{ key: string; label: string; lo: number }> = [
-  { key: 'inv-age-0-to-30-days', label: '0-30', lo: 0 },
-  { key: 'inv-age-31-to-60-days', label: '31-60', lo: 31 },
-  { key: 'inv-age-61-to-90-days', label: '61-90', lo: 61 },
-  { key: 'inv-age-91-to-180-days', label: '91-180', lo: 91 },
-  { key: 'inv-age-181-to-270-days', label: '181-270', lo: 181 },
-  { key: 'inv-age-271-to-365-days', label: '271-365', lo: 271 },
-  { key: 'inv-age-365-plus-days', label: '365+', lo: 366 },
+// 库龄档(与报告真实列名对应,不重叠,合计=总库存)。lo/hi=该档天数范围(hi=null 表示开区间)。
+const AGE_BUCKETS: Array<{ key: string; label: string; lo: number; hi: number | null }> = [
+  { key: 'inv-age-0-to-30-days', label: '0-30', lo: 0, hi: 30 },
+  { key: 'inv-age-31-to-60-days', label: '31-60', lo: 31, hi: 60 },
+  { key: 'inv-age-61-to-90-days', label: '61-90', lo: 61, hi: 90 },
+  { key: 'inv-age-91-to-180-days', label: '91-180', lo: 91, hi: 180 },
+  { key: 'inv-age-181-to-270-days', label: '181-270', lo: 181, hi: 270 },
+  { key: 'inv-age-271-to-365-days', label: '271-365', lo: 271, hi: 365 },
+  { key: 'inv-age-365-plus-days', label: '365+', lo: 366, hi: null },
 ];
+
+/**
+ * 按阈值取"与之相交的库龄档":档的上界 >= 阈值即计入(开区间档恒计入)。
+ * 不能用 lo >= minAgeDays:那样 --min-age-days 100 会把 91-180 整档丢掉,
+ * 实际阈值静默变成 181;这里改为包含相交档,并由调用方在结果里注明实际统计范围。
+ */
+export function bucketsForMinAge(minAgeDays: number): typeof AGE_BUCKETS {
+  return AGE_BUCKETS.filter((b) => b.hi === null || b.hi >= minAgeDays);
+}
 
 function rawCell(row: Row, keys: string[]): string | undefined {
   for (const k of keys) {
@@ -49,7 +58,7 @@ export interface AgedItem {
 }
 
 export interface AgedOptions {
-  /** 库龄 >= 该天数的单位算老货(按档取:>=90 即 91+ 天档) */
+  /** 库龄阈值天数:凡与该阈值相交的库龄档都计入(如 100 计入 91-180 及更老各档) */
   minAgeDays: number;
   /** 老货单位数达到多少才列出,默认 1 */
   minUnits: number;
@@ -57,11 +66,11 @@ export interface AgedOptions {
 }
 
 /**
- * 纯过滤 + 排序:把库龄 >= minAgeDays 的档单位数相加为 agedUnits,达标者按 agedUnits 降序。
+ * 纯过滤 + 排序:把与 minAgeDays 相交的库龄档单位数相加为 agedUnits,达标者按 agedUnits 降序。
  * breakdown 列出被计入的各库龄档单位数(>0 的档),和 ERP 库龄列对齐。
  */
 export function selectAgedInventory(rows: Row[], opts: AgedOptions): AgedItem[] {
-  const buckets = AGE_BUCKETS.filter((b) => b.lo >= opts.minAgeDays);
+  const buckets = bucketsForMinAge(opts.minAgeDays);
   const items: AgedItem[] = [];
   for (const row of rows) {
     const breakdown: Record<string, number> = {};
@@ -97,7 +106,7 @@ export const inventoryAged: ToolDefinition = {
   roles: ['Inventory and Order Tracking'],
   flags: [
     { name: 'marketplace', desc: '市场,国家码如 US / CA / MX(必填)', required: true },
-    { name: 'min-age-days', desc: '库龄 >= 该天数算老货,默认 90(按档取:30/60/90/180/270/365)' },
+    { name: 'min-age-days', desc: '库龄阈值天数,默认 90;凡与阈值相交的库龄档都计入(如 100 会计入 91-180 档),结果里注明实际统计的档位' },
     { name: 'min-units', desc: '老货单位数达到多少才列出,默认 1(0-100000)' },
     { name: 'limit', desc: '最多返回多少条(可选,默认全部,按老货单位数降序)' },
     { name: 'timeout', desc: '报告最长等待分钟数,默认 10(1-60)' },
@@ -115,6 +124,20 @@ export const inventoryAged: ToolDefinition = {
     const limitRaw = strFlag(ctx.flags, 'limit');
     const limit = limitRaw ? Number(limitRaw) : undefined;
     const timeout = Number(strFlag(ctx.flags, 'timeout') ?? 10);
+
+    // 实际统计的档位(与阈值相交的档);理论上恒有 365+ 兜底,仍防御性处理空档
+    const countedBuckets = bucketsForMinAge(minAgeDays).map((b) => b.label);
+    if (countedBuckets.length === 0) {
+      return {
+        marketplace: mkt.country,
+        minAgeDays,
+        minUnits,
+        count: 0,
+        items: [],
+        countedBuckets,
+        note: `--min-age-days ${minAgeDays} 没有匹配到任何库龄档(报告档位:${AGE_BUCKETS.map((b) => b.label).join('/')}),请调低阈值。`,
+      };
+    }
 
     let items: AgedItem[] = [];
     let note: string | undefined;
@@ -146,6 +169,8 @@ export const inventoryAged: ToolDefinition = {
       minUnits,
       count: items.length,
       items,
+      // 实际统计的库龄档范围(与阈值相交的档),便于与 ERP 口径对齐
+      countedBuckets,
       ...(note ? { note } : {}),
     };
   },
