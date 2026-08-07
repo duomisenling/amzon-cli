@@ -79,3 +79,71 @@ test('单文档 ASIN 列表翻页超过 100 页同样熔断', async () => {
     (e) => e?.subtype === 'aplus.pagination_overflow' && e?.type === 'upstream_error',
   );
 });
+
+// ───────────────────────────────── aplus get(内容本体)
+
+test('summarizeAplusModules 递归收集模块文案与图片替代文本', async () => {
+  const { summarizeAplusModules } = await import('../dist/shortcuts/aplus/content.js');
+  const modules = [
+    {
+      contentModuleType: 'STANDARD_IMAGE_TEXT_OVERLAY',
+      standardImageTextOverlay: {
+        block: {
+          image: {
+            altText: '产品使用场景图',
+            uploadDestinationId: 'internal-ref-123',
+            imageCropSpecification: {},
+          },
+          headline: { value: '大标题文案', decoratorSet: [] },
+          body: { textList: [{ value: '正文第一段', decoratorSet: [] }] },
+        },
+      },
+    },
+    { contentModuleType: 'STANDARD_TEXT', standardText: { headline: { value: '纯文本标题' } } },
+  ];
+  const summaries = summarizeAplusModules(modules);
+  assert.equal(summaries.length, 2);
+  assert.equal(summaries[0].type, 'STANDARD_IMAGE_TEXT_OVERLAY');
+  assert.deepEqual(summaries[0].texts, ['大标题文案', '正文第一段']);
+  assert.deepEqual(summaries[0].imageAltTexts, ['产品使用场景图']);
+  // 内部引用 ID 不该混进文案
+  assert.equal(JSON.stringify(summaries[0].texts).includes('internal-ref-123'), false);
+  assert.deepEqual(summaries[1], { type: 'STANDARD_TEXT', texts: ['纯文本标题'], imageAltTexts: [] });
+});
+
+test('aplus get 返回内容摘要,默认不带原始结构,--raw 才带', async () => {
+  const { aplusGet } = await import('../dist/shortcuts/aplus/content.js');
+  const contentRecord = {
+    contentReferenceKey: 'K1',
+    contentMetadata: { name: '文档名', status: 'APPROVED' },
+    contentDocument: {
+      name: '文档名',
+      contentType: 'EBC',
+      locale: 'de-DE',
+      contentModuleList: [
+        { contentModuleType: 'STANDARD_TEXT', standardText: { headline: { value: '标题' } } },
+      ],
+    },
+  };
+  const makeCtx = (flags) => ({
+    flags: { marketplace: 'DE', contentKey: 'K1', ...flags },
+    progress() {},
+    client: {
+      async get(path, query) {
+        assert.match(path, /contentDocuments\/K1$/);
+        assert.equal(query.includedDataSet, 'CONTENTS,METADATA');
+        return { contentRecord };
+      },
+    },
+  });
+
+  const summary = await aplusGet.execute(makeCtx({}));
+  assert.equal(summary.contentReferenceKey, 'K1');
+  assert.equal(summary.status, 'APPROVED');
+  assert.equal(summary.moduleCount, 1);
+  assert.deepEqual(summary.modules[0].texts, ['标题']);
+  assert.equal('contentDocument' in summary, false, '默认不该带原始结构');
+
+  const raw = await aplusGet.execute(makeCtx({ raw: true }));
+  assert.equal(raw.contentDocument.contentType, 'EBC');
+});

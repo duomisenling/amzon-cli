@@ -17,6 +17,7 @@ import { authWhoami } from './shortcuts/auth/whoami.js';
 import { listingSearch } from './shortcuts/listing/catalog-search.js';
 import { listingGet } from './shortcuts/listing/catalog-get.js';
 import { listingMine, listingSku } from './shortcuts/listing/mine.js';
+import { listingImages } from './shortcuts/listing/images.js';
 import { listingBatch } from './shortcuts/listing/batch.js';
 import { listingIssues } from './shortcuts/listing/issues.js';
 import { listingSchema } from './shortcuts/listing/schema.js';
@@ -65,7 +66,7 @@ import { returnsBySku } from './shortcuts/returns/by-sku.js';
 import { reimbursementsList } from './shortcuts/reimbursements/list.js';
 import { feesEstimate } from './shortcuts/fees/estimate.js';
 import { shipmentsList, shipmentsItems } from './shortcuts/shipments/list.js';
-import { aplusDocuments, aplusAsins, aplusCoverage } from './shortcuts/aplus/content.js';
+import { aplusDocuments, aplusAsins, aplusGet, aplusCoverage } from './shortcuts/aplus/content.js';
 import { catalogBatch } from './shortcuts/catalog/batch.js';
 import { doctorEgress } from './shortcuts/doctor/egress.js';
 
@@ -107,6 +108,7 @@ async function main(): Promise<void> {
     listingGet,
     listingMine,
     listingSku,
+    listingImages,
     listingBatch,
     listingIssues,
     listingSchema,
@@ -127,6 +129,7 @@ async function main(): Promise<void> {
     shipmentsItems,
     aplusDocuments,
     aplusAsins,
+    aplusGet,
     aplusCoverage,
     catalogBatch,
     reportTypes,
