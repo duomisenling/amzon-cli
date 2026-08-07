@@ -42,5 +42,7 @@ jobs:
       - run: npm ci
       - run: npm test
       - run: npm pack --dry-run
-      # 无 token:凭 OIDC 身份发布(需先在 npmjs.com 包设置里登记本仓库+工作流)
-      - run: npm publish --access public
+      # 无 token:凭 OIDC 身份发布(需先在 npmjs.com 包设置里登记本仓库+工作流)。
+      # verbose 日志用于诊断 OIDC 交换是否发生;npm -v 确认用的是升级后的 npm 12+
+      - run: npm -v
+      - run: npm publish --access public --loglevel verbose
