@@ -147,3 +147,53 @@ test('aplus get 返回内容摘要,默认不带原始结构,--raw 才带', async
   const raw = await aplusGet.execute(makeCtx({ raw: true }));
   assert.equal(raw.contentDocument.contentType, 'EBC');
 });
+
+test('content-key 空白串在本地校验被拒,不会拼出 /undefined 请求', async () => {
+  const { aplusGet, aplusAsins } = await import('../dist/shortcuts/aplus/content.js');
+  for (const tool of [aplusGet, aplusAsins]) {
+    assert.throws(
+      () => tool.validate({ marketplace: 'DE', contentKey: '   ' }),
+      (error) => error?.subtype === 'aplus.content_key_required',
+      `${tool.command} 放过了空白 content-key`,
+    );
+  }
+});
+
+test('aplus get --out 的 stdout 摘要带 moduleCount 与状态,而不是 count:undefined', async () => {
+  const { mkdtempSync, rmSync, readFileSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const { aplusGet } = await import('../dist/shortcuts/aplus/content.js');
+  const dir = mkdtempSync(join(tmpdir(), 'amz-aplus-out-'));
+  try {
+    const out = join(dir, 'doc.json');
+    const ctx = {
+      flags: { marketplace: 'DE', contentKey: 'K1', out },
+      progress() {},
+      client: {
+        async get() {
+          return {
+            contentRecord: {
+              contentReferenceKey: 'K1',
+              contentMetadata: { status: 'APPROVED' },
+              contentDocument: {
+                contentType: 'EBC',
+                contentModuleList: [{ contentModuleType: 'STANDARD_TEXT', standardText: { headline: { value: 'T' } } }],
+              },
+            },
+          };
+        },
+      },
+    };
+    const summary = await aplusGet.execute(ctx);
+    assert.equal(summary.savedTo, out);
+    assert.equal(summary.moduleCount, 1, '摘要应带 moduleCount');
+    assert.equal(summary.status, 'APPROVED');
+    assert.equal('count' in summary, false, '不该再出现 count:undefined');
+    // 文件里是完整结果,含原始结构
+    const full = JSON.parse(readFileSync(out, 'utf8'));
+    assert.equal(full.contentDocument.contentType, 'EBC');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

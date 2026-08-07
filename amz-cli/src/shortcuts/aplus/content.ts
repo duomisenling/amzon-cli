@@ -18,10 +18,10 @@
 //
 // 输出沿用全 CLI 的 {ok:true,data} 信封约定;大结果集可用 --out 写文件。
 
-import { writeFileSync } from 'node:fs';
 import type { MarketplaceInfo } from '../../internal/client/regions.js';
+import { AmzError } from '../../internal/errs/errors.js';
 import type { ToolContext, ToolDefinition } from '../../tools/types.js';
-import { assertPageWithinLimit, resolveMarketplace, strFlag } from '../common.js';
+import { assertPageWithinLimit, deliver, resolveMarketplace, strFlag } from '../common.js';
 
 interface ContentMetadataRecord {
   contentReferenceKey?: string;
@@ -161,21 +161,28 @@ export function summarizeAplusModules(modules: unknown[]): AplusModuleSummary[] 
       for (const v of Object.values(rec)) walk(v);
     };
     walk(module);
-    const type =
-      typeof (module as Record<string, unknown> | null)?.['contentModuleType'] === 'string'
-        ? ((module as Record<string, unknown>)['contentModuleType'] as string)
-        : undefined;
+    const rec =
+      typeof module === 'object' && module !== null ? (module as Record<string, unknown>) : undefined;
+    const type = typeof rec?.['contentModuleType'] === 'string' ? (rec['contentModuleType'] as string) : undefined;
     return { type, texts, imageAltTexts };
   });
 }
 
-/** --out 写文件的统一处理:给了路径就写文件返回摘要,否则原样返回。 */
-function deliver(out: string | undefined, data: Record<string, unknown>): Record<string, unknown> {
-  if (out) {
-    writeFileSync(out, JSON.stringify(data, null, 2) + '\n', 'utf8');
-    return { savedTo: out, count: (data['count'] as number) ?? undefined };
+/**
+ * --content-key 必须是非空白串:requiredOption 只挡"没传",挡不住空串/空白,
+ * 放过去会拼出 /contentDocuments/undefined 的真实请求,得到误导性的上游 404。
+ */
+function requireContentKey(flags: Record<string, unknown>): void {
+  if (!strFlag(flags, 'contentKey')) {
+    throw new AmzError({
+      type: 'invalid_param',
+      subtype: 'aplus.content_key_required',
+      param: '--content-key',
+      hintAgent: 'fix_param',
+      hintHuman: '--content-key 不能为空。用 aplus documents 可查到各文档的 contentReferenceKey。',
+      message: '--content-key must be a non-blank contentReferenceKey',
+    });
   }
-  return data;
 }
 
 export const aplusDocuments: ToolDefinition = {
@@ -210,6 +217,9 @@ export const aplusAsins: ToolDefinition = {
     { name: 'content-key', desc: 'A+ 文档的 contentReferenceKey(必填,aplus documents 可查)', required: true },
     { name: 'out', desc: '把结果写到该文件路径(可选)' },
   ],
+  validate: (flags) => {
+    requireContentKey(flags);
+  },
   execute: async (ctx) => {
     const mkt = resolveMarketplace(ctx.flags['marketplace']);
     const key = strFlag(ctx.flags, 'contentKey')!;
@@ -238,6 +248,9 @@ export const aplusGet: ToolDefinition = {
     { name: 'raw', type: 'boolean', desc: '同时返回未加工的 contentDocument 原始结构(默认只给摘要)' },
     { name: 'out', desc: '把结果(含原始结构)写到该文件路径(可选)' },
   ],
+  validate: (flags) => {
+    requireContentKey(flags);
+  },
   execute: async (ctx) => {
     const mkt = resolveMarketplace(ctx.flags['marketplace']);
     const key = strFlag(ctx.flags, 'contentKey')!;
@@ -263,21 +276,27 @@ export const aplusGet: ToolDefinition = {
     const modules = doc?.contentModuleList ?? [];
     const wantRaw = ctx.flags['raw'] === true;
     const out = strFlag(ctx.flags, 'out');
-    return deliver(out, {
-      marketplace: mkt.country,
-      contentReferenceKey: record?.contentReferenceKey ?? key,
-      name: doc?.name ?? record?.contentMetadata?.name,
-      status: record?.contentMetadata?.status,
-      contentType: doc?.contentType,
-      locale: doc?.locale,
-      moduleCount: modules.length,
-      modules: summarizeAplusModules(modules),
-      // --out 落盘时总是带原始结构(文件不嫌大);stdout 默认只给摘要,--raw 才带
-      ...(wantRaw || out ? { contentDocument: doc } : {}),
-      note:
-        'modules 是加工后的摘要(类型/文案/图片替代文本);A+ 模块里的图片在 API 中' +
-        '只有内部引用 ID,拿不到公开 URL。本 API 不覆盖 Premium A+(高级 A+)。',
-    });
+    const status = record?.contentMetadata?.status;
+    return deliver(
+      out,
+      {
+        marketplace: mkt.country,
+        contentReferenceKey: record?.contentReferenceKey ?? key,
+        name: doc?.name ?? record?.contentMetadata?.name,
+        status,
+        contentType: doc?.contentType,
+        locale: doc?.locale,
+        moduleCount: modules.length,
+        modules: summarizeAplusModules(modules),
+        // --out 落盘时总是带原始结构(文件不嫌大);stdout 默认只给摘要,--raw 才带
+        ...(wantRaw || out ? { contentDocument: doc } : {}),
+        note:
+          'modules 是加工后的摘要(类型/文案/图片替代文本);A+ 模块里的图片在 API 中' +
+          '只有内部引用 ID,拿不到公开 URL。本 API 不覆盖 Premium A+(高级 A+)。',
+      },
+      // 文件模式的 stdout 摘要:本命令没有 count 字段,给 moduleCount/状态才有确认价值
+      { moduleCount: modules.length, ...(status ? { status } : {}) },
+    );
   },
 };
 

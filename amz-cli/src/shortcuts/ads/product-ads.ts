@@ -11,11 +11,10 @@
 // 用途:拿"哪些 ASIN/SKU 正在被投放",供下游做"建了活动但零曝光"等盘点。
 // 凭证:走 AdsClient(ADS_* 独立凭证 + profileId 定位主体×站点),与 SP-API 无关。
 
-import { writeFileSync } from 'node:fs';
 import { ADS_CONTENT_TYPES } from '../../internal/client/ads-client.js';
 import { AmzError } from '../../internal/errs/errors.js';
 import type { ToolContext, ToolDefinition } from '../../tools/types.js';
-import { strFlag } from '../common.js';
+import { deliver, strFlag } from '../common.js';
 import { ADS_REGION_FLAG, adsRegion, requireProfileId } from './common.js';
 
 type ProductAd = Record<string, unknown>;
@@ -84,14 +83,6 @@ async function fetchAllProductAds(
     hintHuman: `拉取投放商品时分页超过安全上限(${MAX_LIST_PAGES} 页),已停止;请加 --state 过滤或联系维护者。`,
     message: `productAds pagination exceeded ${MAX_LIST_PAGES} pages`,
   });
-}
-
-function deliver(out: string | undefined, data: Record<string, unknown>): Record<string, unknown> {
-  if (out) {
-    writeFileSync(out, JSON.stringify(data, null, 2) + '\n', 'utf8');
-    return { savedTo: out, count: (data['count'] as number) ?? undefined };
-  }
-  return data;
 }
 
 /** 解析可接受状态列表;空/未给时用默认。 */

@@ -1,5 +1,6 @@
 // shortcuts 共用的小工具(参照 lark-cli shortcuts/common 的角色)
 
+import { writeFileSync } from 'node:fs';
 import { gunzipSync } from 'node:zlib';
 import { AmzError } from '../internal/errs/errors.js';
 import { amazonFetch, type EgressChannel } from '../internal/net/egress.js';
@@ -207,6 +208,26 @@ export function assertPageWithinLimit(page: number, subtype: string, what: strin
       '请稍后重试;若反复出现请联系管理员。',
     message: `pagination exceeded ${MAX_AUTO_PAGES} pages while fetching ${what}`,
   });
+}
+
+/**
+ * --out 写文件的统一处理:给了路径就写完整 JSON 到文件、返回摘要,否则原样返回。
+ * summary 是文件模式下 stdout 摘要要带的字段(如 moduleCount/状态);
+ * 不给时回退取 data.count(多数列表型命令的惯例字段),没有就只报 savedTo。
+ * (aplus 与 ads/product-ads 曾各有一份逐字重复的私有副本,已统一收拢到这里。)
+ */
+export function deliver(
+  out: string | undefined,
+  data: Record<string, unknown>,
+  summary?: Record<string, unknown>,
+): Record<string, unknown> {
+  if (out) {
+    writeFileSync(out, JSON.stringify(data, null, 2) + '\n', 'utf8');
+    const fallback =
+      typeof data['count'] === 'number' ? { count: data['count'] } : {};
+    return { savedTo: out, ...(summary ?? fallback) };
+  }
+  return data;
 }
 
 /**
