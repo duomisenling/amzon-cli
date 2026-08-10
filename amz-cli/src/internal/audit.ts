@@ -163,9 +163,28 @@ export function flushAuditUploads(): Promise<void> {
   return next;
 }
 
+/**
+ * 归一上报地址:只填了域名(路径为空或 /)时自动补上 /audit。
+ * 服务器的接收路由是 /audit,但"照模板抄漏后缀"是实际发生过的事故——
+ * 上报失败又是刻意静默的,漏一个后缀 = 整套审计无声失效,所以两端都做兼容。
+ */
+export function normalizeAuditUrl(raw: string): string {
+  try {
+    const u = new URL(raw);
+    if (u.pathname === '' || u.pathname === '/') {
+      u.pathname = '/audit';
+      return u.toString();
+    }
+    return raw;
+  } catch {
+    return raw; // 地址本身非法就原样交给 fetch 去失败,行为不变
+  }
+}
+
 async function flushOnce(): Promise<void> {
-  const url = process.env['AMZ_AUDIT_HTTP']?.trim();
-  if (!url || uploadBuffer.length === 0) return;
+  const rawUrl = process.env['AMZ_AUDIT_HTTP']?.trim();
+  if (!rawUrl || uploadBuffer.length === 0) return;
+  const url = normalizeAuditUrl(rawUrl);
   const token = process.env['AMZ_AUDIT_TOKEN']?.trim();
   const batch = uploadBuffer.splice(0, uploadBuffer.length);
   try {

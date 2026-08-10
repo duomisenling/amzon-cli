@@ -162,3 +162,12 @@ test('flushAuditUploads 失败时把该批回填缓冲,下次成功一并补发�
     delete process.env.AMZ_AUDIT_NODE;
   }
 });
+
+test('normalizeAuditUrl:只填域名时自动补 /audit,已带路径的原样不动', async () => {
+  const { normalizeAuditUrl } = await import('../dist/internal/audit.js');
+  assert.equal(normalizeAuditUrl('https://a.example'), 'https://a.example/audit');
+  assert.equal(normalizeAuditUrl('https://a.example/'), 'https://a.example/audit');
+  assert.equal(normalizeAuditUrl('https://a.example/audit'), 'https://a.example/audit');
+  assert.equal(normalizeAuditUrl('https://a.example/custom'), 'https://a.example/custom');
+  assert.equal(normalizeAuditUrl('不是地址'), '不是地址'); // 非法地址原样交给 fetch 失败
+});

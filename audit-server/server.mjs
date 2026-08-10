@@ -193,8 +193,9 @@ const server = createServer(async (req, res) => {
 
     if (path === '/health') return send(res, 200, 'ok');
 
-    // 上报接收
-    if (path === '/audit' && req.method === 'POST') {
+    // 上报接收。根路径的 POST 也当上报收:同事机器上 AMZ_AUDIT_HTTP 只填了域名
+    // (漏了 /audit 后缀)的旧配置不必挨台修改,服务端直接兼容。密钥校验完全一致。
+    if ((path === '/audit' || path === '/') && req.method === 'POST') {
       const auth = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
       if (!safeEqual(auth, AUDIT_TOKEN)) return send(res, 401, 'unauthorized');
       const body = await readBody(req);
