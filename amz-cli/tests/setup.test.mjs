@@ -67,12 +67,22 @@ test('install dry-run describes changes without invoking npm or touching config'
   assert.equal(result.plan.configPath, join(home, '.amz-cli', '.env'));
 });
 
-test('installer installs the latest npm version and its packaged Skill', () => {
+test('installer installs the latest npm version and every packaged Skill', () => {
   const home = tempRoot('install-home');
   const globalRoot = tempRoot('global-root');
-  const skillDir = join(globalRoot, 'amz-cli', 'skills', 'amz-cli');
+  const skillsRoot = join(globalRoot, 'amz-cli', 'skills');
+  const skillDir = join(skillsRoot, 'amz-cli');
   mkdirSync(skillDir, { recursive: true });
   writeFileSync(join(skillDir, 'SKILL.md'), '---\nname: amz-cli\ndescription: test\n---\n');
+  // 第二个随包 Skill:安装逻辑必须自动发现它,不能只认 amz-cli
+  const extraSkillDir = join(skillsRoot, 'amazon-title-compliance');
+  mkdirSync(extraSkillDir, { recursive: true });
+  writeFileSync(
+    join(extraSkillDir, 'SKILL.md'),
+    '---\nname: amazon-title-compliance\ndescription: test\n---\n',
+  );
+  // 没有 SKILL.md 的目录要被跳过(例如将来放共享资源)
+  mkdirSync(join(skillsRoot, 'not-a-skill'), { recursive: true });
 
   const npmCalls = [];
   const npxCalls = [];
@@ -98,7 +108,9 @@ test('installer installs the latest npm version and its packaged Skill', () => {
     ['install', '--global', 'amz-cli@latest'],
     ['root', '--global'],
   ]);
+  // 按目录名排序:amazon-title-compliance 在 amz-cli 之前
   assert.deepEqual(npxCalls, [
+    ['--yes', 'skills', 'add', extraSkillDir, '--yes', '--global'],
     ['--yes', 'skills', 'add', skillDir, '--yes', '--global'],
   ]);
   assert.equal(result.globalPackageRoot, join(globalRoot, 'amz-cli'));

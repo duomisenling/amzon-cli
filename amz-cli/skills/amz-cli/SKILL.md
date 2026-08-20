@@ -14,6 +14,7 @@ description: 使用 amz-cli 安全查询和运营 Amazon 卖家店铺。适用�
 | 用户意图 | 首选命令 |
 |---|---|
 | 单个 ASIN/SKU 或全店的销售额、销量、日报 | `sales stats`（单品带 `--asin` 或 `--sku`） |
+| 全店找近期销量/转化下降、流量不转化或 Buy Box 下滑的商品 | `sales product-performance`（默认比较相邻两个30天周期；结果是待诊断候选，不是广告处罚清单） |
 | 哪些**以前好卖、现在断货/库存告急要补货**的品 | `inventory restock-candidates`（一步合并库存与近 N 天销量，别手动拼） |
 | 哪些品**快断货了、该补货**（还有货但撑不了几天） | `inventory low-stock`（默认可售天数≤14，按紧急度升序） |
 | 最近**亚马逊赔了多少钱**、什么原因 | `reimbursements list`（默认最近 30 天，合计+按原因/SKU 拆分） |
@@ -22,6 +23,7 @@ description: 使用 amz-cli 安全查询和运营 Amazon 卖家店铺。适用�
 | 哪些是**周转慢/压货**（货能卖但可售天数过长，卖得慢） | `inventory slow-moving`（默认可售天数>90天，按可售天数降序） |
 | 最近**哪些品退货多**、主要退货原因 | `returns by-sku`（默认最近 30 天，按 SKU 汇总退货量/笔数/主因） |
 | **哪些搜索词白花钱**（点击多、0 订单，要加否定词） | `ads wasted-spend`（默认点击≥10、0 转化；结果可直接喂 `ads negative-keyword`） |
+| **分析某个产品/整个账户的广告怎么调**（活动状态+绩效+废词一起看） | `ads review`（一条命令并行取齐活动清单/绩效/废词，`--asin` 聚焦单品；**不要**串行跑 campaigns+performance+wasted-spend+report-run） |
 | 订单、单笔订单、商品明细 | `orders list/get/items` |
 | FBA 库存 | `inventory list` |
 | FBA 货件和收货差异 | `shipments list/items` |
@@ -41,8 +43,8 @@ description: 使用 amz-cli 安全查询和运营 Amazon 卖家店铺。适用�
 
 - **不要开场连查一串 `--help`。** 上面的命令选择表已给出首选命令，意图和参数明确时直接运行。只有真的不确定某个参数含义时才对**那一个命令**查一次 `--help`；不要把 amz-cli、子命令、参数逐层帮助全翻一遍再动手。
 - **绝不探测或安装 Python**（`which python`、`python --version`、找可用解释器）。amz-cli 不依赖 Python，这类调用对本工具毫无意义。需要对大报告做筛选/聚合时，用 Node 一次性处理，不要先探测环境。
-- **本店销量/销售数据只来自 `sales stats` 或 `report run`。** 绝不用 sorftime、OPS、`ops_get_*` 等第三方接口当本店销量源——它们返回的是第三方市场估算，不是本店真实销量，用了就是错。判断“以前好卖 / 卖得好不好”必须基于本店自己的销量数据。
-- **翻页要一次翻完。** 复用同一命令加 `--next-token <值>` 连续翻页；分页 token 只在短时间内有效，不要拖到过期再从头重拉。
+- **本店销量/销售数据只来自 `sales stats`、`sales product-performance` 或 `report run`。** 绝不用 sorftime、OPS、`ops_get_*` 等第三方接口当本店销量源——它们返回的是第三方市场估算，不是本店真实销量，用了就是错。判断“以前好卖 / 卖得好不好”必须基于本店自己的销量数据。
+- **翻页要一次翻完。** 一般列表复用同一命令加 `--next-token <值>` 连续翻页；分页 token 只在短时间内有效，不要拖到过期再从头重拉。`listing mine --asin` 未显式给 `--page-token` 时会自动读完全部结果页，不要再手工逐页调用。
 
 ## 意图判定与追问
 
@@ -63,6 +65,7 @@ description: 使用 amz-cli 安全查询和运营 Amazon 卖家店铺。适用�
 - “做个销售报告”，无法判断是单品、全店汇总还是导出文件：询问需要哪一种。
 - 明确说“ASIN B0... 最近 30 天销量”：直接用 `sales stats --asin ... --days 30`，不要创建全店报告。
 - 明确说“最近 7 天全店经营情况”：直接用不带 ASIN/SKU 的 `sales stats`。
+- 问“全店哪些产品最近卖差了 / 转化下降 / 有流量没订单”：直接用 `sales product-performance --marketplace <站点>`。默认最多返回20个候选；候选只表示表现需要解释，必须继续检查库存、可售性、Buy Box、Listing和广告映射。连续取下一批时复用返回的 `asOf`，并传 `--offset <nextOffset>`，不要改成随机抽取。
 - 问“哪些以前好卖的品断货了 / 哪些要补货”：直接用 `inventory restock-candidates`（默认看最近 30 天销量、彻底断货的品；想含低库存加 `--stock-threshold`）。这条命令已在服务端合并库存与销量，**不要**自己逐页翻库存、再单独跑销售报告、再手动按 ASIN 对——那正是过去一句话炸几十个调用的根源。
 - 明确说“导出、全量、全店明细、报表文件”：再使用 `report run`。Reports API 的 ASIN 筛选不是通用能力，不要自行添加不存在的参数。
 - 问“某个 ASIN 的差评”：先说明 `feedback run` 是全店卖家反馈，不能按 ASIN 过滤，再确认是否仍要查全店反馈；不要把卖家反馈说成商品评价。
@@ -77,7 +80,7 @@ description: 使用 amz-cli 安全查询和运营 Amazon 卖家店铺。适用�
 - 用户给的信息不完整或明显不对时，**指出来并给正确示范**，不要直接报错或沉默。
 - 术语要落地：说"广告活动名称"而不是"campaign name"，说"每天最多花多少钱（日预算）"而不是"budget"。
 
-使用 `--marketplace` 指定国家码。欧洲广告还必须使用 `--region eu` 和欧洲对应的 `profileId`。列表响应含 `nextToken` 时，用同一命令加 `--next-token <值>` 继续翻页。
+使用 `--marketplace` 指定国家码。欧洲广告还必须使用 `--region eu` 和欧洲对应的 `profileId`。列表响应含 `nextToken` 时，用同一命令加 `--next-token <值>` 继续翻页；`listing mine --asin` 的自动翻页例外见上文。
 
 Broker 模式下，`listing mine/sku/schema/update` 的 Seller ID 必须来自 Broker；`--seller-id` 只能核对，不能在服务端缺配置时兜底。`listing update` 的 `add`/`replace`/`merge` 必须带对象数组 `value`；`merge` 只允许 `fulfillment_availability` 和 `purchasable_offer` 两个官方支持属性。
 
@@ -92,6 +95,10 @@ Broker 模式下，`listing mine/sku/schema/update` 的 Seller ID 必须来自 B
 - 写请求的 5xx、网络超时或 `write_result_unknown`：不得自动重试。先让用户用只读状态/列表命令或后台核对是否已生效。
 
 报告的 `--timeout` 单位为分钟，只接受 1–60 的有限数字。超时只停止本次等待，不会取消 Amazon 服务端已经创建的报告；店铺报告可用 `report status/download` 继续，广告报告用 `ads report-status --profile-id <ID> --report-id <ID>` 查询。
+
+广告报表日期限制：单张报表最多 31 天、数据只保留约 95 天（都是亚马逊硬限制）。要查更长区间：`ads performance` / `ads wasted-spend` / `ads review` 会自动分段拉取合并，直接传完整区间即可（最多 95 天）；`ads report-run` 拿的是单张原始报表，超 31 天会报 `fix_param` 错，按提示把日期拆成多段分别拉。同配置+同日期的报表短时间内重复创建时（HTTP 425），CLI 会自动复用原报表，不需要改参数重试。
+
+`ads campaigns` / `ads keywords` 的 `--max` 是想要的总条数（默认 100，最大 10000），超过 100 会自动翻页拼接，不必手动循环 `--next-token`。
 
 ## 写操作：最高优先级
 
@@ -116,7 +123,7 @@ Broker 模式下，`listing mine/sku/schema/update` 的 Seller ID 必须来自 B
 
 **用户只给了 ASIN、但写操作需要 SKU 时，必须先得到本店真实 SKU，绝不猜测：**
 
-1. 先用只读命令解析该 ASIN 对应本店铺的 SKU：`listing mine --marketplace <站点> --asin <ASIN>`。多个 ASIN 必须合并成一次批量查询，例如 `--asin "ASIN1,ASIN2,ASIN3"`（最多 20 个），不要逐个调用浪费时间。优先读取 `asinSkuMatches` 的逐个映射；`matchedSkus` 仅用于兼容旧输出。
+1. 先用只读命令解析该 ASIN 对应本店铺的 SKU：`listing mine --marketplace <站点> --asin <ASIN>`。多个 ASIN 必须合并成一次批量查询，例如 `--asin "ASIN1,ASIN2,ASIN3"`（最多 20 个），不要逐个调用浪费时间。ASIN模式会自动读完全部结果页；优先读取 `asinSkuMatches` 的逐个映射，`matchedSkus` 仅用于兼容旧输出。
 2. 按结果分三种处理：
    - **正好 1 个 SKU**：明确告诉用户「ASIN X 对应你店铺的 SKU Y，本次将对 Y 操作」，然后用这个明确的 SKU 进入预览。
    - **多个 SKU**：**必须列出来让用户选**哪个，绝不自行挑一个写入。
@@ -162,6 +169,8 @@ Broker 模式下，`listing mine/sku/schema/update` 的 Seller ID 必须来自 B
 **完整广告默认一次审批后创建并投放：**
 
 `ads campaign-create` 只创建 Campaign 外壳；用户说“用这些关键词建广告”时用 `ads keyword-campaign-launch`（MCP 通道对应 `prepare_keyword_campaign` → `launch_keyword_campaign`）。
+
+完整关键词广告在调用 `prepare_keyword_campaign` 前还有一道业务确认门禁：先在聊天中展示最终版竞品选择、全部关键词及数据依据、Campaign拆分、日预算、竞价和创建后状态，并明确询问用户是否确认。用户最初说“开广告/直接创建”只表示目标，不表示认可Agent生成的具体结构；没有收到对当前版本的明确确认就不能prepare。确认后任何业务参数变化都要展示新版本并重新确认，禁止用连续prepare试探方案。
 
 用户说“把这些 SKU/关键词加入已有活动”时，使用 `ads campaign-extend`（MCP 对应 `prepare_ads_campaign_extend` → `apply_ads_campaign_extend`），不能改用 `keyword-campaign-launch` 创建新活动，也不能因旧 `launchId` 冲突而换一个 `launchId` 重建。
 

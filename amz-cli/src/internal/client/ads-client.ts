@@ -341,6 +341,21 @@ export class AdsClient {
           status: resp.status,
         });
       }
+      if (resp.status === 425) {
+        // 报表去重:同配置+同日期的报表短时间内重复创建,亚马逊回 425,
+        // detail 里带原报表 ID("The Request is a duplicate of : <reportId>")。
+        // 类型化抛出,让 createReport 能识别并直接复用原报表,而不是报错退出。
+        throw new AmzError({
+          type: 'upstream_error',
+          subtype: 'ads.duplicate_request',
+          hintAgent: 'fix_param',
+          hintHuman:
+            '亚马逊提示这是重复请求(HTTP 425):同样配置的报表几分钟前刚创建过。' +
+            '响应里带了原报表编号,可用 ads report-status 直接查它。',
+          message: `Ads API HTTP 425 on ${path}: ${text.slice(0, 800)}`,
+          status: resp.status,
+        });
+      }
       if (resp.status >= 500 && !retryable5xx) {
         throw new AmzError({
           type: 'upstream_error',

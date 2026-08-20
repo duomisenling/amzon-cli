@@ -15,7 +15,12 @@ import { AmzError } from '../../internal/errs/errors.js';
 import type { SpApiClient } from '../../internal/client/client.js';
 import type { Region } from '../../internal/client/regions.js';
 import type { ToolDefinition } from '../../tools/types.js';
-import { resolveMarketplace, strFlag, validateNumberFlag } from '../common.js';
+import {
+  assertPageWithinLimit,
+  resolveMarketplace,
+  strFlag,
+  validateNumberFlag,
+} from '../common.js';
 
 export async function resolveSellerId(
   flags: Record<string, unknown>,
@@ -272,26 +277,57 @@ export const listingMine: ToolDefinition = {
         : `· 正在列出本店铺在 ${mkt.country} 的 listing...`,
     );
 
-    const resp = (await ctx.client.get(
-      `/listings/2021-08-01/items/${encodeURIComponent(sellerId)}`,
-      {
-        marketplaceIds: mkt.id,
-        includedData: 'summaries,issues',
-        ...identifierQuery,
-        ...(strFlag(ctx.flags, 'withIssueSeverity')
-          ? { withIssueSeverity: strFlag(ctx.flags, 'withIssueSeverity') }
-          : {}),
-        ...(strFlag(ctx.flags, 'pageSize') ? { pageSize: Number(strFlag(ctx.flags, 'pageSize')) } : {}),
-        ...(strFlag(ctx.flags, 'pageToken') ? { pageToken: strFlag(ctx.flags, 'pageToken') } : {}),
-      },
-      mkt.region,
-    )) as {
+    const path = `/listings/2021-08-01/items/${encodeURIComponent(sellerId)}`;
+    const baseQuery = {
+      marketplaceIds: mkt.id,
+      includedData: 'summaries,issues',
+      ...identifierQuery,
+      ...(strFlag(ctx.flags, 'withIssueSeverity')
+        ? { withIssueSeverity: strFlag(ctx.flags, 'withIssueSeverity') }
+        : {}),
+      ...(strFlag(ctx.flags, 'pageSize')
+        ? { pageSize: Number(strFlag(ctx.flags, 'pageSize')) }
+        : {}),
+    };
+    type ListingMineResponse = {
       numberOfResults?: number;
       pagination?: { nextToken?: string };
       items?: Array<Record<string, unknown>>;
     };
+    const explicitPageToken = strFlag(ctx.flags, 'pageToken');
+    const autoPageAsins = Boolean(asins && !explicitPageToken);
+    const items: Array<Record<string, unknown>> = [];
+    const seenTokens = new Set<string>();
+    let pageToken = explicitPageToken;
+    let page = 1;
+    let numberOfResults = 0;
+    let nextToken: string | undefined;
 
-    const items = resp.items ?? [];
+    do {
+      assertPageWithinLimit(page, 'listing.pagination_overflow', 'Listing ASIN 映射');
+      const resp = (await ctx.client.get(
+        path,
+        { ...baseQuery, ...(pageToken ? { pageToken } : {}) },
+        mkt.region,
+      )) as ListingMineResponse;
+      items.push(...(resp.items ?? []));
+      numberOfResults = Math.max(numberOfResults, resp.numberOfResults ?? 0, items.length);
+      nextToken = resp.pagination?.nextToken;
+      if (!autoPageAsins || !nextToken) break;
+      if (seenTokens.has(nextToken)) {
+        throw new AmzError({
+          type: 'upstream_error',
+          subtype: 'listing.pagination_token_loop',
+          hintAgent: 'report_to_human',
+          hintHuman: 'Listing ASIN 映射返回了重复分页游标，已停止，避免无限循环。请稍后重试。',
+          message: `repeated Listings nextToken while mapping ASINs: ${nextToken}`,
+        });
+      }
+      seenTokens.add(nextToken);
+      pageToken = nextToken;
+      page += 1;
+    } while (true);
+
     const requestedAsins = asins?.split(',').map((asin) => asin.trim().toUpperCase()).filter(Boolean);
     const asinSkuMatches = requestedAsins?.map((asin) => {
       const matched = items.filter((item) => {
@@ -300,9 +336,13 @@ export const listingMine: ToolDefinition = {
           : [];
         return summaries.some((summary) => String(summary['asin'] ?? '').toUpperCase() === asin);
       });
-      const matchedSkus = matched
-        .map((item) => item['sku'])
-        .filter((sku): sku is string => typeof sku === 'string' && sku.length > 0);
+      const matchedSkus = [
+        ...new Set(
+          matched
+            .map((item) => item['sku'])
+            .filter((sku): sku is string => typeof sku === 'string' && sku.length > 0),
+        ),
+      ];
       return {
         asin,
         skus: matchedSkus,
@@ -311,10 +351,12 @@ export const listingMine: ToolDefinition = {
     });
     return {
       marketplace: mkt.country,
-      numberOfResults: resp.numberOfResults ?? 0,
+      numberOfResults,
       items,
       // 按 ASIN 查时,直接把命中的本店铺 SKU 提出来,方便"ASIN→我的 SKU"确认
-      ...(asins ? { matchedSkus: items.map((it) => it['sku']).filter(Boolean) } : {}),
+      ...(asins
+        ? { matchedSkus: [...new Set(items.map((it) => it['sku']).filter(Boolean))] }
+        : {}),
       ...(asinSkuMatches
         ? {
             asinSkuMatches,
@@ -324,7 +366,8 @@ export const listingMine: ToolDefinition = {
               .map((match) => ({ asin: match.asin, skus: match.skus })),
           }
         : {}),
-      ...(resp.pagination?.nextToken ? { nextToken: resp.pagination.nextToken } : {}),
+      ...(autoPageAsins ? { pagesFetched: page, paginationComplete: true } : {}),
+      ...(!autoPageAsins && nextToken ? { nextToken } : {}),
     };
   },
 };

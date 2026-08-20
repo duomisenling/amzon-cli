@@ -17,7 +17,15 @@ import { ADS_CONTENT_TYPES } from '../../internal/client/ads-client.js';
 import { AmzError } from '../../internal/errs/errors.js';
 import type { ToolContext, ToolDefinition } from '../../tools/types.js';
 import { fetchDocumentBuffer, strFlag, validateNumberFlag } from '../common.js';
-import { ADS_REGION_FLAG, adsRegion, requireDate, requireProfileId, validateDateRange } from './common.js';
+import {
+  ADS_REGION_FLAG,
+  ADS_REPORT_MAX_DAYS,
+  adsRegion,
+  requireDate,
+  requireProfileId,
+  splitDateRange,
+  validateReportWindow,
+} from './common.js';
 
 // 官方 Postman 示例的默认列(SP campaigns 日报)
 const DEFAULT_COLUMNS =
@@ -109,9 +117,48 @@ function requireReportId(flags: Record<string, unknown>): string {
   return reportId;
 }
 
+/** 从 425 响应文本里抠出原报表 ID(UUID);抠不到返回 undefined。 */
+export function extractDuplicateReportId(message: string): string | undefined {
+  return /duplicate of\s*:?\s*\\?"?([0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12})/.exec(
+    message,
+  )?.[1];
+}
+
 async function createReport(ctx: ToolContext, profileId: string, cfg: AdsReportConfig): Promise<string> {
   ctx.progress(`· 正在创建广告报表(${cfg.desc ?? cfg.reportTypeId},${cfg.start} ~ ${cfg.end})...`);
-  const resp = (await ctx.adsClient.request('POST', '/reporting/reports', {
+  let resp: { reportId?: string } | null;
+  try {
+    resp = await requestCreateReport(ctx, profileId, cfg);
+  } catch (err) {
+    // 同配置+同日期的报表几分钟内重复创建,亚马逊回 425 并附原报表 ID——
+    // 直接复用它继续轮询下载,不让"刚查过一次"变成报错。
+    const dupId =
+      err instanceof AmzError && err.subtype === 'ads.duplicate_request'
+        ? extractDuplicateReportId(err.message)
+        : undefined;
+    if (!dupId) throw err;
+    ctx.progress(`· 同配置报表几分钟前刚创建过,复用已有报表 ${dupId}...`);
+    return dupId;
+  }
+
+  if (!resp?.reportId) {
+    throw new AmzError({
+      type: 'upstream_error',
+      subtype: 'ads.report_no_id',
+      hintAgent: 'report_to_human',
+      hintHuman: '广告报表创建请求已发出,但亚马逊没有返回报表编号,原始响应见 message。',
+      message: `createReport returned: ${JSON.stringify(resp).slice(0, 500)}`,
+    });
+  }
+  return resp.reportId;
+}
+
+async function requestCreateReport(
+  ctx: ToolContext,
+  profileId: string,
+  cfg: AdsReportConfig,
+): Promise<{ reportId?: string } | null> {
+  return (await ctx.adsClient.request('POST', '/reporting/reports', {
     profileId,
     region: adsRegion(ctx.flags),
     contentType: ADS_CONTENT_TYPES.createReport,
@@ -129,22 +176,15 @@ async function createReport(ctx: ToolContext, profileId: string, cfg: AdsReportC
       },
     },
   })) as { reportId?: string } | null;
-
-  if (!resp?.reportId) {
-    throw new AmzError({
-      type: 'upstream_error',
-      subtype: 'ads.report_no_id',
-      hintAgent: 'report_to_human',
-      hintHuman: '广告报表创建请求已发出,但亚马逊没有返回报表编号,原始响应见 message。',
-      message: `createReport returned: ${JSON.stringify(resp).slice(0, 500)}`,
-    });
-  }
-  return resp.reportId;
 }
 
 /**
  * 一条龙拉广告报表并返回解析后的行数组(创建 → 轮询 → 下载 → JSON.parse)。
  * 供聚合类命令(如 ads wasted-spend)复用;拿不到下载地址时抛类型化错误。
+ *
+ * 跨度超过单张 31 天上限时自动分段:每段一张报表,行数组按段拼接。
+ * 下游都是"天级明细再汇总"的用法,拼接不改变语义。先把所有段的创建请求发完
+ * (亚马逊并行生成),再逐段等待下载,总耗时≈最慢的一段;timeoutMin 按段计。
  */
 export async function fetchAdsReportRows(
   ctx: ToolContext,
@@ -152,28 +192,41 @@ export async function fetchAdsReportRows(
   cfg: AdsReportConfig,
   timeoutMin: number,
 ): Promise<Array<Record<string, unknown>>> {
-  const reportId = await createReport(ctx, profileId, cfg);
-  const status = await waitForAdsReport(ctx, profileId, reportId, timeoutMin);
-  const url = typeof status['url'] === 'string' ? (status['url'] as string) : undefined;
-  if (!url) {
-    throw new AmzError({
-      type: 'upstream_error',
-      subtype: 'ads.report_no_url',
-      hintAgent: 'report_to_human',
-      hintHuman: '广告报表已完成但响应里没有下载地址,请稍后重试或用 ads report-status 查看原始响应。',
-      message: `ads report ${reportId} completed without url: ${JSON.stringify(status).slice(0, 500)}`,
-    });
+  const segments = splitDateRange(cfg.start, cfg.end);
+  if (segments.length > 1) {
+    ctx.progress(
+      `· 日期跨度超过单张报表 ${ADS_REPORT_MAX_DAYS} 天上限,自动分成 ${segments.length} 段拉取合并...`,
+    );
   }
-  ctx.progress('· 报表已生成,正在下载解析...');
-  const buf = await fetchDocumentBuffer(url, {
-    gzip: true,
-    what: '广告报表',
-    subtype: 'ads.report_download_failed',
-    // 广告报表走广告的出口(ADS_PROXY;留空则复用 SP_API_PROXY)
-    channel: 'ads',
-  });
-  const parsed = JSON.parse(buf.toString('utf8')) as unknown;
-  return Array.isArray(parsed) ? (parsed as Array<Record<string, unknown>>) : [];
+  const reportIds: string[] = [];
+  for (const seg of segments) {
+    reportIds.push(await createReport(ctx, profileId, { ...cfg, start: seg.start, end: seg.end }));
+  }
+  const rows: Array<Record<string, unknown>> = [];
+  for (const reportId of reportIds) {
+    const status = await waitForAdsReport(ctx, profileId, reportId, timeoutMin);
+    const url = typeof status['url'] === 'string' ? (status['url'] as string) : undefined;
+    if (!url) {
+      throw new AmzError({
+        type: 'upstream_error',
+        subtype: 'ads.report_no_url',
+        hintAgent: 'report_to_human',
+        hintHuman: '广告报表已完成但响应里没有下载地址,请稍后重试或用 ads report-status 查看原始响应。',
+        message: `ads report ${reportId} completed without url: ${JSON.stringify(status).slice(0, 500)}`,
+      });
+    }
+    ctx.progress('· 报表已生成,正在下载解析...');
+    const buf = await fetchDocumentBuffer(url, {
+      gzip: true,
+      what: '广告报表',
+      subtype: 'ads.report_download_failed',
+      // 广告报表走广告的出口(ADS_PROXY;留空则复用 SP_API_PROXY)
+      channel: 'ads',
+    });
+    const parsed = JSON.parse(buf.toString('utf8')) as unknown;
+    if (Array.isArray(parsed)) rows.push(...(parsed as Array<Record<string, unknown>>));
+  }
+  return rows;
 }
 
 async function getReportStatus(
@@ -284,8 +337,8 @@ export const adsReportRun: ToolDefinition = {
   flags: [
     { name: 'profile-id', desc: '广告账户 profileId(必填,ads profiles 可查)', required: true },
     ADS_REGION_FLAG,
-    { name: 'start', desc: '开始日期 YYYY-MM-DD(必填)', required: true },
-    { name: 'end', desc: '结束日期 YYYY-MM-DD(必填)', required: true },
+    { name: 'start', desc: '开始日期 YYYY-MM-DD(必填;数据只保留约 95 天)', required: true },
+    { name: 'end', desc: '结束日期 YYYY-MM-DD(必填;单张报表最多 31 天,更长请分段或用 ads performance / wasted-spend 自动分段)', required: true },
     {
       name: 'type',
       desc:
@@ -297,7 +350,8 @@ export const adsReportRun: ToolDefinition = {
   ],
   validate: (flags) => {
     requireProfileId(flags);
-    validateDateRange(flags);
+    // 单张原始报表没法自动分段合并,跨度>31 天本地直接拦下并提示怎么拆
+    validateReportWindow(flags, { maxDays: ADS_REPORT_MAX_DAYS });
     validateNumberFlag(flags, 'timeout', '--timeout', { min: 1, max: 60 });
   },
   execute: async (ctx) => {

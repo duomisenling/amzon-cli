@@ -12,7 +12,7 @@
 import { ADS_CONTENT_TYPES } from '../../internal/client/ads-client.js';
 import type { ToolDefinition } from '../../tools/types.js';
 import { strFlag, validateNumberFlag } from '../common.js';
-import { ADS_REGION_FLAG, adsRegion, requireProfileId } from './common.js';
+import { ADS_REGION_FLAG, adsRegion, parseCampaignIdList, requireProfileId } from './common.js';
 
 export const adsProfiles: ToolDefinition = {
   service: 'ads',
@@ -42,36 +42,51 @@ export const adsCampaigns: ToolDefinition = {
       desc: '按状态过滤(默认不过滤)',
       enum: ['ENABLED', 'PAUSED', 'ARCHIVED'],
     },
-    { name: 'max', desc: '最多返回条数,默认 100' },
+    { name: 'campaign-id', desc: '只查这些活动,逗号分隔可多个(可选,查具体活动详情用)' },
+    { name: 'max', desc: '最多返回条数,默认 100;超过 100 会自动按页拼接(单页上限 100),最大 10000' },
     { name: 'next-token', desc: '分页游标(上一页返回的 nextToken)' },
   ],
   validate: (flags) => {
     requireProfileId(flags);
-    validateNumberFlag(flags, 'max', '--max', { min: 1, max: 100, integer: true });
+    parseCampaignIdList(flags);
+    validateNumberFlag(flags, 'max', '--max', { min: 1, max: 10_000, integer: true });
   },
   execute: async (ctx) => {
     const profileId = requireProfileId(ctx.flags);
     const state = strFlag(ctx.flags, 'state');
+    const campaignIds = parseCampaignIdList(ctx.flags);
+    // --max 是"想要的总条数":亚马逊单页最多 100,超出的部分 CLI 自动翻页拼接,
+    // 免得调用方(尤其 Agent)传个 500 就吃 invalid_param。
     const max = Number(strFlag(ctx.flags, 'max') ?? 100);
 
     ctx.progress(`· 正在查询 profile ${profileId} 的 SP 广告活动...`);
-    const resp = (await ctx.adsClient.request('POST', '/sp/campaigns/list', {
-      profileId,
-      region: adsRegion(ctx.flags),
-      contentType: ADS_CONTENT_TYPES.spCampaign,
-      retry5xx: true,
-      body: {
-        maxResults: max,
-        ...(strFlag(ctx.flags, 'nextToken') ? { nextToken: strFlag(ctx.flags, 'nextToken') } : {}),
-        ...(state ? { stateFilter: { include: [state] } } : {}),
-      },
-    })) as { campaigns?: Array<Record<string, unknown>>; nextToken?: string } | null;
+    const campaigns: Array<Record<string, unknown>> = [];
+    let nextToken = strFlag(ctx.flags, 'nextToken');
+    for (;;) {
+      const resp = (await ctx.adsClient.request('POST', '/sp/campaigns/list', {
+        profileId,
+        region: adsRegion(ctx.flags),
+        contentType: ADS_CONTENT_TYPES.spCampaign,
+        retry5xx: true,
+        body: {
+          maxResults: Math.min(100, max - campaigns.length),
+          ...(nextToken ? { nextToken } : {}),
+          ...(state ? { stateFilter: { include: [state] } } : {}),
+          ...(campaignIds.length > 0 ? { campaignIdFilter: { include: campaignIds } } : {}),
+        },
+      })) as { campaigns?: Array<Record<string, unknown>>; nextToken?: string } | null;
+      campaigns.push(...(resp?.campaigns ?? []));
+      nextToken = resp?.nextToken;
+      // 空页也停:防服务端 nextToken 一直给但不再回数据时死循环
+      if (!nextToken || campaigns.length >= max || (resp?.campaigns?.length ?? 0) === 0) break;
+      ctx.progress(`· 已取 ${campaigns.length} 条,继续翻页...`);
+    }
 
     return {
       profileId,
-      count: resp?.campaigns?.length ?? 0,
-      campaigns: resp?.campaigns ?? [],
-      ...(resp?.nextToken ? { nextToken: resp.nextToken } : {}),
+      count: campaigns.length,
+      campaigns,
+      ...(nextToken ? { nextToken } : {}),
     };
   },
 };

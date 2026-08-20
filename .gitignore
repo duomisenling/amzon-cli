@@ -9,6 +9,7 @@
 /ads-api-docs/
 
 # 所有项目的真实环境变量与私钥
+/mcp.env
 **/.env
 **/.env.*
 !**/.env.example

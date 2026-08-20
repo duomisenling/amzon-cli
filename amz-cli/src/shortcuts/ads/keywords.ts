@@ -18,6 +18,7 @@ import {
   adsRegion,
   assertAdsWriteAccepted,
   assertChangeNeeded,
+  parseCampaignIdList,
   recordFromContext,
   requirePositiveAmount,
   requireProfileId,
@@ -50,35 +51,46 @@ export const adsKeywords: ToolDefinition = {
   flags: [
     { name: 'profile-id', desc: '广告账户 profileId(必填)', required: true },
     ADS_REGION_FLAG,
-    { name: 'campaign-id', desc: '按广告活动过滤(可选)' },
+    { name: 'campaign-id', desc: '按广告活动过滤,逗号分隔可多个(可选)' },
     { name: 'state', desc: '按状态过滤(可选)', enum: ['ENABLED', 'PAUSED', 'ARCHIVED'] },
-    { name: 'max', desc: '最多返回条数,默认 100' },
+    { name: 'max', desc: '最多返回条数,默认 100;超过 100 会自动按页拼接(单页上限 100),最大 10000' },
     { name: 'next-token', desc: '分页游标(上一页返回的 nextToken)' },
   ],
   validate: (flags) => {
     requireProfileId(flags);
-    validateNumberFlag(flags, 'max', '--max', { min: 1, max: 100, integer: true });
+    parseCampaignIdList(flags);
+    validateNumberFlag(flags, 'max', '--max', { min: 1, max: 10_000, integer: true });
   },
   execute: async (ctx) => {
     const profileId = requireProfileId(ctx.flags);
-    const campaignId = strFlag(ctx.flags, 'campaignId');
+    const campaignIds = parseCampaignIdList(ctx.flags);
     const state = strFlag(ctx.flags, 'state');
+    // --max 是"想要的总条数",单页最多 100,超出部分自动翻页拼接(同 ads campaigns)
+    const max = Number(strFlag(ctx.flags, 'max') ?? 100);
 
     ctx.progress('· 正在查询关键词列表...');
-    const resp = (await ctx.adsClient.request('POST', '/sp/keywords/list', {
-      profileId,
-      region: adsRegion(ctx.flags),
-      contentType: ADS_CONTENT_TYPES.spKeyword,
-      retry5xx: true,
-      body: {
-        maxResults: Number(strFlag(ctx.flags, 'max') ?? 100),
-        ...(strFlag(ctx.flags, 'nextToken') ? { nextToken: strFlag(ctx.flags, 'nextToken') } : {}),
-        ...(campaignId ? { campaignIdFilter: { include: [campaignId] } } : {}),
-        ...(state ? { stateFilter: { include: [state] } } : {}),
-      },
-    })) as { keywords?: Array<Record<string, unknown>>; nextToken?: string } | null;
+    const raw: Array<Record<string, unknown>> = [];
+    let nextToken = strFlag(ctx.flags, 'nextToken');
+    for (;;) {
+      const resp = (await ctx.adsClient.request('POST', '/sp/keywords/list', {
+        profileId,
+        region: adsRegion(ctx.flags),
+        contentType: ADS_CONTENT_TYPES.spKeyword,
+        retry5xx: true,
+        body: {
+          maxResults: Math.min(100, max - raw.length),
+          ...(nextToken ? { nextToken } : {}),
+          ...(campaignIds.length > 0 ? { campaignIdFilter: { include: campaignIds } } : {}),
+          ...(state ? { stateFilter: { include: [state] } } : {}),
+        },
+      })) as { keywords?: Array<Record<string, unknown>>; nextToken?: string } | null;
+      raw.push(...(resp?.keywords ?? []));
+      nextToken = resp?.nextToken;
+      if (!nextToken || raw.length >= max || (resp?.keywords?.length ?? 0) === 0) break;
+      ctx.progress(`· 已取 ${raw.length} 条,继续翻页...`);
+    }
 
-    const keywords = (resp?.keywords ?? []).map((k) => ({
+    const keywords = raw.map((k) => ({
       keywordId: k['keywordId'],
       text: k['keywordText'],
       matchType: k['matchType'],
@@ -87,7 +99,7 @@ export const adsKeywords: ToolDefinition = {
       campaignId: k['campaignId'],
       adGroupId: k['adGroupId'],
     }));
-    return { profileId, count: keywords.length, keywords, ...(resp?.nextToken ? { nextToken: resp.nextToken } : {}) };
+    return { profileId, count: keywords.length, keywords, ...(nextToken ? { nextToken } : {}) };
   },
 };
 

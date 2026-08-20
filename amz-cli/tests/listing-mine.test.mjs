@@ -62,6 +62,96 @@ test('listing mine maps a batch of ASINs to unique, missing, and ambiguous SKUs'
   ]);
   assert.deepEqual(result.unmatchedAsins, ['B0CCCCCCCC']);
   assert.deepEqual(result.ambiguousAsins, [{ asin: 'B0BBBBBBBB', skus: ['SKU-B1', 'SKU-B2'] }]);
+  assert.equal(result.pagesFetched, 1);
+  assert.equal(result.paginationComplete, true);
+});
+
+test('listing mine --asin automatically fetches every page before mapping SKUs', async () => {
+  process.env.SELLER_ID = 'SELLER';
+  const calls = [];
+  const pages = {
+    first: {
+      numberOfResults: 3,
+      items: [{ sku: 'SKU-A', summaries: [{ asin: 'B0AAAAAAAA' }] }],
+      pagination: { nextToken: 'TOKEN-2' },
+    },
+    'TOKEN-2': {
+      numberOfResults: 3,
+      items: [{ sku: 'SKU-B', summaries: [{ asin: 'B0BBBBBBBB' }] }],
+      pagination: { nextToken: 'TOKEN-3' },
+    },
+    'TOKEN-3': {
+      numberOfResults: 3,
+      items: [{ sku: 'SKU-C', summaries: [{ asin: 'B0CCCCCCCC' }] }],
+    },
+  };
+  const ctx = {
+    flags: { marketplace: 'US', asin: 'B0AAAAAAAA,B0BBBBBBBB,B0CCCCCCCC' },
+    progress() {},
+    client: {
+      async get(path, query, region) {
+        calls.push({ path, query, region });
+        return pages[query.pageToken ?? 'first'];
+      },
+    },
+  };
+
+  const result = await listingMine.execute(ctx);
+
+  assert.equal(calls.length, 3);
+  assert.deepEqual(calls.map((call) => call.query.pageToken), [undefined, 'TOKEN-2', 'TOKEN-3']);
+  assert.equal(result.pagesFetched, 3);
+  assert.equal(result.paginationComplete, true);
+  assert.equal(result.nextToken, undefined);
+  assert.deepEqual(result.unmatchedAsins, []);
+  assert.deepEqual(result.matchedSkus, ['SKU-A', 'SKU-B', 'SKU-C']);
+});
+
+test('listing mine with an explicit page token remains a single-page request', async () => {
+  process.env.SELLER_ID = 'SELLER';
+  const calls = [];
+  const ctx = {
+    flags: { marketplace: 'US', asin: 'B0AAAAAAAA', pageToken: 'TOKEN-2' },
+    progress() {},
+    client: {
+      async get(path, query, region) {
+        calls.push({ path, query, region });
+        return {
+          numberOfResults: 2,
+          items: [{ sku: 'SKU-A', summaries: [{ asin: 'B0AAAAAAAA' }] }],
+          pagination: { nextToken: 'TOKEN-3' },
+        };
+      },
+    },
+  };
+
+  const result = await listingMine.execute(ctx);
+
+  assert.equal(calls.length, 1);
+  assert.equal(result.pagesFetched, undefined);
+  assert.equal(result.paginationComplete, undefined);
+  assert.equal(result.nextToken, 'TOKEN-3');
+});
+
+test('listing mine stops when the API repeats an ASIN pagination token', async () => {
+  process.env.SELLER_ID = 'SELLER';
+  let calls = 0;
+  const ctx = {
+    flags: { marketplace: 'US', asin: 'B0AAAAAAAA' },
+    progress() {},
+    client: {
+      async get() {
+        calls += 1;
+        return { numberOfResults: 2, items: [], pagination: { nextToken: 'SAME' } };
+      },
+    },
+  };
+
+  await assert.rejects(
+    () => listingMine.execute(ctx),
+    (error) => error?.subtype === 'listing.pagination_token_loop',
+  );
+  assert.equal(calls, 2);
 });
 
 test('listing mine --skus keeps SKU identifiersType and omits matchedSkus', async () => {

@@ -11,7 +11,7 @@
 
 import type { ToolDefinition } from '../../tools/types.js';
 import { strFlag, validateNumberFlag } from '../common.js';
-import { ADS_REGION_FLAG, requireDate, requireProfileId, validateDateRange } from './common.js';
+import { ADS_REGION_FLAG, requireDate, requireProfileId, validateReportWindow } from './common.js';
 import { fetchAdsReportRows } from './report.js';
 
 export interface AdsPerfRow {
@@ -185,11 +185,11 @@ export const adsPerformance: ToolDefinition = {
     { name: 'min-spend', desc: '只看花费≥该值的,过滤噪声(默认 0)' },
     { name: 'acos-min', desc: '只留 ACOS≥该百分比的(如 50 = 50%);有花费零单的始终保留' },
     { name: 'limit', desc: '最多返回多少行(可选,默认全部,最差排前)' },
-    { name: 'timeout', desc: '报表最长等待分钟数,默认 10(1-60)' },
+    { name: 'timeout', desc: '报表最长等待分钟数,默认 10(1-60;跨度>31 天自动分段拉取,按段计时)' },
   ],
   validate: (flags) => {
     requireProfileId(flags);
-    validateDateRange(flags);
+    validateReportWindow(flags);
     const by = strFlag(flags, 'by');
     if (by !== undefined && by !== 'campaign' && by !== 'ad-group') {
       throw new Error('--by 只能是 campaign 或 ad-group');

@@ -43,6 +43,7 @@ import { adsProfiles, adsCampaigns } from './shortcuts/ads/commands.js';
 import { adsReportRun, adsReportStatus } from './shortcuts/ads/report.js';
 import { adsWastedSpend } from './shortcuts/ads/wasted-spend.js';
 import { adsPerformance } from './shortcuts/ads/performance.js';
+import { adsReview } from './shortcuts/ads/review.js';
 import { adsProductAds, adsCoverage } from './shortcuts/ads/product-ads.js';
 import { adsCampaignCreate } from './shortcuts/ads/campaign-create.js';
 import { adsCampaignExtend } from './shortcuts/ads/campaign-extend.js';
@@ -57,6 +58,7 @@ import { adsBudgetBatch } from './shortcuts/ads/budget-batch.js';
 import { adsTestAccountCreate, adsTestAccountStatus } from './shortcuts/ads/test-account.js';
 import { adsAuthUrl, adsAuthExchange } from './shortcuts/ads/auth.js';
 import { salesStats } from './shortcuts/sales/stats.js';
+import { salesProductPerformance } from './shortcuts/sales/product-performance.js';
 import { inventoryList } from './shortcuts/inventory/list.js';
 import { restockCandidates } from './shortcuts/inventory/restock-candidates.js';
 import { inventoryAged } from './shortcuts/inventory/aged.js';
@@ -118,6 +120,7 @@ async function main(): Promise<void> {
     ordersGet,
     ordersItems,
     salesStats,
+    salesProductPerformance,
     inventoryList,
     restockCandidates,
     inventoryAged,
@@ -156,6 +159,7 @@ async function main(): Promise<void> {
     adsReportStatus,
     adsWastedSpend,
     adsPerformance,
+    adsReview,
     adsProductAds,
     adsCoverage,
     // —— 广告写操作(dry-run/confirm 门槛;首次验证走测试账户=广告沙盒)——

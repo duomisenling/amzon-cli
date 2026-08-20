@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, readdirSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { AmzError } from '../internal/errs/errors.js';
 import type { PackageInfo } from '../internal/package-info.js';
@@ -28,6 +28,26 @@ interface InstallOptions {
   initConfig?: () => { path: string; created: boolean };
 }
 
+/**
+ * 列出已安装全局包里随包分发的 Skill 目录(含 SKILL.md 的直接子目录),按名字排序。
+ * 目录不存在或读不了时返回空数组,由调用方按"包损坏"处理。
+ */
+function packagedSkillPaths(globalPackageRoot: string): string[] {
+  const skillsRoot = join(globalPackageRoot, 'skills');
+  if (!existsSync(skillsRoot)) return [];
+  let entries;
+  try {
+    entries = readdirSync(skillsRoot, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  return entries
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => join(skillsRoot, entry.name))
+    .filter((path) => existsSync(join(path, 'SKILL.md')))
+    .sort();
+}
+
 export function createInstallPlan(info: PackageInfo, home?: string): InstallPlan {
   // 必须装 @latest 而不是当前运行版本:从旧版 CLI 跑 amz-cli install 时,
   // info.version 是旧版号,按它装等于"永远装回旧版",升级就失效了。
@@ -41,7 +61,7 @@ export function createInstallPlan(info: PackageInfo, home?: string): InstallPlan
         '--yes',
         'skills',
         'add',
-        `<npm-global-root>/${info.name}/skills/amz-cli`,
+        `<npm-global-root>/${info.name}/skills/<每个随包 Skill>`,
         '--yes',
         '--global',
       ],
@@ -49,7 +69,7 @@ export function createInstallPlan(info: PackageInfo, home?: string): InstallPlan
     configPath: userConfigPath(home),
     effects: [
       '安装或升级全局 amz-cli 与 amz-cli-mcp 命令到 npm 最新版',
-      '安装与新装全局包同版本的 amz-cli Agent Skill(从新装的全局包目录读取)',
+      '安装与新装全局包同版本的全部 Agent Skill(从新装的全局包目录读取)',
       '首次安装时创建不含真实凭证的用户配置模板；已有配置绝不覆盖',
     ],
   };
@@ -80,11 +100,16 @@ export function installAmzCli(info: PackageInfo, options: InstallOptions = {}): 
     // Skill 从"刚装好的全局包目录"读取,而不是当前运行的包:保证升级后装的是新版 Skill。
     const globalRoot = runNpm(['root', '--global'], true).trim();
     const globalPackageRoot = join(globalRoot, ...info.name.split('/'));
-    const skillPath = join(globalPackageRoot, 'skills', 'amz-cli');
-    if (!existsSync(join(skillPath, 'SKILL.md'))) {
-      throw new Error(`installed package is missing Skill: ${skillPath}`);
+    // 装随包分发的**全部** Skill,不只 amz-cli:新增 Skill 只要进了 package.json 的
+    // files 就会被这里发现,不用再改安装逻辑。amz-cli 本体缺失仍视为包损坏。
+    const skillPaths = packagedSkillPaths(globalPackageRoot);
+    const corePath = join(globalPackageRoot, 'skills', 'amz-cli');
+    if (!skillPaths.includes(corePath)) {
+      throw new Error(`installed package is missing Skill: ${corePath}`);
     }
-    runNpx(['--yes', 'skills', 'add', skillPath, '--yes', '--global']);
+    for (const skillPath of skillPaths) {
+      runNpx(['--yes', 'skills', 'add', skillPath, '--yes', '--global']);
+    }
 
     const config = options.initConfig
       ? options.initConfig()

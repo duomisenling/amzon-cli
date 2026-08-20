@@ -1,0 +1,4 @@
+interface:
+  display_name: "Amazon 广告策略"
+  short_description: "筛选差商品，批量优化Amazon广告并生成审批"
+  default_prompt: "使用 $amazon-ads-strategist 筛选或分析最多20个ASIN，给出有数据来源的广告方案；先让我确认竞品、词库、结构、预算和竞价，再生成审批预览。"

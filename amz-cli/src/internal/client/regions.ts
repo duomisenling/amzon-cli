@@ -36,7 +36,13 @@ export interface MarketplaceInfo {
   currency: string; // ISO 4217,费用预估等接口用
 }
 
-/** 团队当前涉及的市场(7 市场 + 授权账号里出现过的邻近市场)。 */
+/**
+ * 官方在售市场全集(sp-api marketplace-ids 文档口径)。
+ * NA 四国已与真实账号 getMarketplaceParticipations 交叉验证;
+ * 2026-08-20 补录 EU 扩展站(PL/NL/SE/BE/TR/IE 等)与 FE——欧洲店铺普遍带这些站点,
+ * 表里缺一个,--marketplace 连国家码带 marketplaceId 都会被拒。
+ * 新站点接入时可用 auth whoami 的返回交叉核对 marketplaceId。
+ */
 export const MARKETPLACES: MarketplaceInfo[] = [
   // —— NA ——(与真实账号 API 返回交叉验证)
   { id: 'ATVPDKIKX0DER', country: 'US', region: 'na', name: 'Amazon.com', currency: 'USD' },
@@ -49,6 +55,21 @@ export const MARKETPLACES: MarketplaceInfo[] = [
   { id: 'A13V1IB3VIYZZH', country: 'FR', region: 'eu', name: 'Amazon.fr', currency: 'EUR' },
   { id: 'APJ6JRA9NG5V4', country: 'IT', region: 'eu', name: 'Amazon.it', currency: 'EUR' },
   { id: 'A1RKKUPIHCS9HS', country: 'ES', region: 'eu', name: 'Amazon.es', currency: 'EUR' },
+  { id: 'A1805IZSGTT6HS', country: 'NL', region: 'eu', name: 'Amazon.nl', currency: 'EUR' },
+  { id: 'A2NODRKZP88ZB9', country: 'SE', region: 'eu', name: 'Amazon.se', currency: 'SEK' },
+  { id: 'A1C3SOZRARQ6R3', country: 'PL', region: 'eu', name: 'Amazon.pl', currency: 'PLN' },
+  { id: 'AMEN7PMS3EDWL', country: 'BE', region: 'eu', name: 'Amazon.com.be', currency: 'EUR' },
+  { id: 'A28R8C7NBKEWEA', country: 'IE', region: 'eu', name: 'Amazon.ie', currency: 'EUR' },
+  { id: 'A33AVAJ2PDY3EV', country: 'TR', region: 'eu', name: 'Amazon.com.tr', currency: 'TRY' },
+  { id: 'A2VIGQ35RCS4UG', country: 'AE', region: 'eu', name: 'Amazon.ae', currency: 'AED' },
+  { id: 'A17E79C6D8DWNP', country: 'SA', region: 'eu', name: 'Amazon.sa', currency: 'SAR' },
+  { id: 'ARBP9OOSHTCHU', country: 'EG', region: 'eu', name: 'Amazon.eg', currency: 'EGP' },
+  { id: 'A21TJRUUN4KGV', country: 'IN', region: 'eu', name: 'Amazon.in', currency: 'INR' },
+  { id: 'AE08WJ6YKNBMC', country: 'ZA', region: 'eu', name: 'Amazon.co.za', currency: 'ZAR' },
+  // —— FE ——(官方文档核实)
+  { id: 'A1VC38T7YXB528', country: 'JP', region: 'fe', name: 'Amazon.co.jp', currency: 'JPY' },
+  { id: 'A39IBJ37TRP1C6', country: 'AU', region: 'fe', name: 'Amazon.com.au', currency: 'AUD' },
+  { id: 'A19VAU5U5O7RUS', country: 'SG', region: 'fe', name: 'Amazon.sg', currency: 'SGD' },
 ];
 
 /** 按国家码(US/DE/…,大小写不敏感)查市场。查不到返回 undefined。 */

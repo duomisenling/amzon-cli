@@ -19,6 +19,29 @@ export function requireProfileId(flags: Record<string, unknown>): string {
   return profileId;
 }
 
+/**
+ * 解析逗号分隔的活动 ID 列表(未传返回空数组;空项自动剔除)。
+ * 每个 ID 必须纯数字——Agent 常一次传多个("id1,id2,id3"),这里统一收口。
+ */
+export function parseCampaignIdList(flags: Record<string, unknown>): string[] {
+  const raw = strFlag(flags, 'campaignId');
+  if (raw === undefined) return [];
+  const ids = raw.split(',').map((s) => s.trim()).filter(Boolean);
+  for (const id of ids) {
+    if (!/^\d+$/.test(id)) {
+      throw new AmzError({
+        type: 'invalid_param',
+        subtype: 'ads.invalid_campaign_id',
+        param: '--campaign-id',
+        hintAgent: 'fix_param',
+        hintHuman: `--campaign-id 应为纯数字,多个用逗号分隔(收到 "${id}")。`,
+        message: `invalid campaignId in list: ${id}`,
+      });
+    }
+  }
+  return ids;
+}
+
 /** --campaign-id 必须为纯数字;返回校验后的值。 */
 export function requireCampaignId(flags: Record<string, unknown>): string {
   const campaignId = strFlag(flags, 'campaignId') ?? '';
@@ -58,6 +81,92 @@ export function requireDate(
     });
   }
   return v;
+}
+
+/** Ads V3 DAILY 报表单张的最大日期跨度(天),亚马逊硬限制,超了服务端直接 HTTP 400。 */
+export const ADS_REPORT_MAX_DAYS = 31;
+
+/** SP 报表数据留存期(天):--start 早于它,亚马逊同样 400 拒绝,拉不回更早的数据。 */
+export const ADS_REPORT_RETENTION_DAYS = 95;
+
+const DAY_MS = 86_400_000;
+
+function isoDay(ms: number): string {
+  return new Date(ms).toISOString().slice(0, 10);
+}
+
+/**
+ * 把闭区间 [start, end] 切成若干段,每段最多 maxDays 天(含首尾,段间无缝无重叠)。
+ * 聚合类报表命令用它自动绕开单张 31 天限制;start/end 需已通过 requireDate 校验。
+ */
+export function splitDateRange(
+  start: string,
+  end: string,
+  maxDays: number = ADS_REPORT_MAX_DAYS,
+): Array<{ start: string; end: string }> {
+  const endMs = Date.parse(`${end}T00:00:00.000Z`);
+  const segments: Array<{ start: string; end: string }> = [];
+  let cursor = Date.parse(`${start}T00:00:00.000Z`);
+  while (cursor <= endMs) {
+    const segEnd = Math.min(cursor + (maxDays - 1) * DAY_MS, endMs);
+    segments.push({ start: isoDay(cursor), end: isoDay(segEnd) });
+    cursor = segEnd + DAY_MS;
+  }
+  return segments;
+}
+
+/**
+ * 报表命令专用的日期窗校验(campaign-create 等允许未来日期的场景不要用):
+ *   - 基础格式与先后顺序(复用 validateDateRange);
+ *   - --start 不得早于约 95 天的留存期,--end 不得在未来(各留 1 天余量,容忍店铺时区差);
+ *   - 传了 maxDays 时跨度超限直接拦下(单张报表场景);不传则由调用方自动分段,跨度不限。
+ * 与其让亚马逊回一个光秃秃的 400,不如本地就把"怎么改"讲清楚。
+ * todayMs 仅供单测注入,生产走当前时间。
+ */
+export function validateReportWindow(
+  flags: Record<string, unknown>,
+  opts: { maxDays?: number; todayMs?: number } = {},
+): void {
+  validateDateRange(flags);
+  const start = requireDate(flags, 'start', '--start');
+  const end = requireDate(flags, 'end', '--end');
+  const todayMidnight = Date.parse(`${isoDay(opts.todayMs ?? Date.now())}T00:00:00.000Z`);
+  const startMs = Date.parse(`${start}T00:00:00.000Z`);
+  const endMs = Date.parse(`${end}T00:00:00.000Z`);
+  const earliest = todayMidnight - (ADS_REPORT_RETENTION_DAYS - 1) * DAY_MS;
+  if (startMs < earliest) {
+    throw new AmzError({
+      type: 'invalid_param',
+      subtype: 'ads.report_window_too_old',
+      param: '--start',
+      hintAgent: 'fix_param',
+      hintHuman: `广告报表数据只保留约 ${ADS_REPORT_RETENTION_DAYS} 天,--start 最早只能到 ${isoDay(earliest)}(收到 ${start}),更早的数据亚马逊已不提供。`,
+      message: `--start ${start} is beyond the ~${ADS_REPORT_RETENTION_DAYS}-day ads report retention window (earliest: ${isoDay(earliest)})`,
+    });
+  }
+  if (endMs > todayMidnight + DAY_MS) {
+    throw new AmzError({
+      type: 'invalid_param',
+      subtype: 'ads.report_window_future',
+      param: '--end',
+      hintAgent: 'fix_param',
+      hintHuman: `--end 不能是未来日期(收到 ${end},今天是 ${isoDay(todayMidnight)})。`,
+      message: `--end ${end} is in the future (today: ${isoDay(todayMidnight)})`,
+    });
+  }
+  if (opts.maxDays !== undefined) {
+    const spanDays = Math.round((endMs - startMs) / DAY_MS) + 1;
+    if (spanDays > opts.maxDays) {
+      throw new AmzError({
+        type: 'invalid_param',
+        subtype: 'ads.report_window_too_long',
+        param: '--start',
+        hintAgent: 'fix_param',
+        hintHuman: `亚马逊单张日报最多 ${opts.maxDays} 天(收到 ${spanDays} 天)。请把日期拆成多段分别拉取;或改用 ads performance / ads wasted-spend,它们会自动分段合并。`,
+        message: `date range ${start}~${end} spans ${spanDays} days, exceeding the ${opts.maxDays}-day per-report limit`,
+      });
+    }
+  }
 }
 
 /** 校验广告日期范围；同一天的日报允许 start=end。 */

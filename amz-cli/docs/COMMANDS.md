@@ -58,7 +58,7 @@ amz-cli config mcp --combined --accounts shop-a,shop-b --output .\amz-cli-mcp.js
 
 ## 基础概念(先读这个)
 
-**市场代号**:`--marketplace` 用国家码,当前支持 `US / CA / MX / BR / UK / DE / FR / IT / ES`。
+**市场代号**:`--marketplace` 用国家码,当前支持 NA `US / CA / MX / BR`、EU `UK(GB) / DE / FR / IT / ES / NL / SE / PL / BE / IE / TR / AE / SA / EG / IN / ZA`、FE `JP / AU / SG`,也可直接传 marketplaceId。店铺实际开通了哪些国家,用 `auth whoami --region <区域>` 查(列出该区域凭证参与的全部市场)。
 
 **跨区域(北美 + 欧洲)**:命令按 `--marketplace` 自动路由区域——查 `DE` 自动用欧洲端点和欧洲凭证,无需任何切换动作。前提是 `.env` 里配了对应区域的 token(`LWA_REFRESH_TOKEN_EU` 等);没配时会明确提示。按订单号/报告号查询的跟进命令(orders get、report status 等)查欧洲数据时带上可选的 `--marketplace DE`。
 
@@ -150,6 +150,7 @@ amz-cli config mcp --include-default --accounts shop-b --output .\amz-cli-mcp.js
 | ads | `campaigns` | 广告活动列表 | 读 |
 | ads | `keywords` | 投放的关键词列表 | 读 |
 | ads | `report-run / report-status` | 广告报表(5 种预设) | 读 |
+| ads | `review` | 广告体检一条龙(活动+绩效+废词,可聚焦 ASIN) | 读 |
 | ads | `campaign-create` | 创建广告活动 | 🔒 写 |
 | ads | `keyword-campaign-launch` | 按固定方案创建完整手动关键词广告 | 🔒 写 |
 | ads | `campaign-state` | 启用/暂停广告活动 | 🔒 写 |
@@ -230,7 +231,7 @@ amz-cli listing mine --marketplace DE --asin B0XXXXXXXX
 amz-cli listing mine --marketplace FR --asin "B0AAAAAAAA,B0BBBBBBBB,B0CCCCCCCC"
 ```
 
-`--asin` 按 ASIN 精确查本店铺对应的 SKU，支持一次传 1–20 个逗号分隔的 ASIN。返回里的 `asinSkuMatches` 会逐个给出 `UNIQUE / NOT_FOUND / AMBIGUOUS` 状态和对应 SKU；`matchedSkus` 保留用于兼容旧调用。`--skus` 和 `--asin` 二选一。只有全部 ASIN 都唯一对应一个 SKU 时，才能进入广告或 Listing 写入预览。
+`--asin` 按 ASIN 精确查本店铺对应的 SKU，支持一次传 1–20 个逗号分隔的 ASIN。未显式给 `--page-token` 时会自动读完全部结果页，再生成映射，避免后页 ASIN 被误报为 `NOT_FOUND`；返回里的 `asinSkuMatches` 会逐个给出 `UNIQUE / NOT_FOUND / AMBIGUOUS` 状态和对应 SKU，`matchedSkus` 保留用于兼容旧调用。显式给 `--page-token` 时仍只取一页并返回 `nextToken`。`--skus` 和 `--asin` 二选一。只有全部 ASIN 都唯一对应一个 SKU 时，才能进入广告或 Listing 写入预览。
 
 需要卖家编号。本地凭证模式在 `.env` 配置 `SELLER_ID=...`(或每次传 `--seller-id`)；Broker 模式必须由管理员配置服务端 `SELLER_ID_<店铺>_<区域>`，本地 flag/env 不作为兜底。
 
@@ -329,6 +330,25 @@ amz-cli sales stats --marketplace US --fulfillment AFN
 ```
 
 返回每个时段的:订单数、销量、销售额、客单价,外加汇总。`--granularity` 可选 `Hour / Day / Week / Month / Year / Total`。
+
+### sales product-performance — 全店按 ASIN 找近期表现下降候选
+
+```powershell
+# 最近30天对比前30天,最多返回20个需要继续诊断的子ASIN
+amz-cli --account shop-a sales product-performance --marketplace US
+
+# 调整候选门槛
+amz-cli --account shop-a sales product-performance --marketplace US --days 14 --decline-percent 40 --min-sessions 30 --limit 20
+
+# 固定数据截止日，稳定取得同一次扫描的第21–40名
+amz-cli --account shop-a sales product-performance --marketplace US --as-of 2026-08-13 --offset 20 --limit 20
+```
+
+命令请求两份 Amazon `GET_SALES_AND_TRAFFIC_REPORT`，默认以昨天（UTC）为最后一个完整日期，按子 ASIN 对比两个相邻等长周期的销量、销售额、Sessions、转化率和 Buy Box 百分比。候选原因包括：自身销量下降、有流量零转化、转化显著下降和 Buy Box明显下降。报告中被子体引用的父 ASIN 汇总行会排除，避免与子体重复。
+
+返回值包含稳定的 `scanId`、`asOf`、`totalCandidates`、`offset`、`hasMore` 和 `nextOffset`。后续批次必须复用相同 `--as-of` 和门槛；截止日或门槛变化会形成新的扫描。已生成的报告内容下载瞬断时会在原 `reportId` 上续传三次，最终失败会返回可恢复的 `report.download_resume_required`，无需重新创建报告。
+
+这是只读候选入口，不是广告动作生成器：返回的商品还必须检查库存、可售性、Listing、价格、Buy Box和广告映射，不能把“卖差了”直接等同于广告问题。报告需要账号具备 Selling Partner Insights 对应权限；权限不足或报告不可用时，改为分析运营提供的1–20个ASIN，或从 `ads performance` / `inventory slow-moving` 的候选继续诊断。
 
 ---
 
@@ -473,11 +493,14 @@ amz-cli feed result --feed-id <编号>    # 看哪些行成功/失败及原因
 ```powershell
 amz-cli ads profiles                                       # 广告账户列表,拿 profileId(第一步)
 amz-cli ads campaigns --profile-id <ID> --state ENABLED    # 正在投放的广告活动
-amz-cli ads keywords --profile-id <ID> --campaign-id <ID>  # 某活动投的词(含竞价)
+amz-cli ads campaigns --profile-id <ID> --campaign-id <ID1>,<ID2>  # 只查这几个活动的详情
+amz-cli ads keywords --profile-id <ID> --campaign-id <ID>  # 某活动投的词(含竞价,逗号分隔可多个活动)
 # 返回 nextToken 时继续翻页，其他过滤参数保持不变
 amz-cli ads campaigns --profile-id <ID> --state ENABLED --next-token <nextToken>
 amz-cli ads keywords --profile-id <ID> --campaign-id <ID> --next-token <nextToken>
 ```
+
+`--max` 是"想要的总条数"(默认 100,最大 10000):超过 100 时 CLI 自动按页(单页 100)翻页拼接,不必手动循环 `--next-token`;凑满 `--max` 后若还有更多,结果里仍带 `nextToken`。
 
 ### 读:广告报表(5 种预设)
 
@@ -492,6 +515,10 @@ amz-cli ads report-run --profile-id <ID> --type <预设> --start 2026-07-01 --en
 | `targeting` | 关键词表现 | 我投的词哪个赚哪个亏 |
 | `advertised-products` | 广告商品 | 哪个产品的广告在赚钱/烧钱 |
 | `purchased-products` | 购买商品 | 点了广告最后买走了什么 |
+
+**日期限制**：单张报表最多 31 天（亚马逊硬限制），数据只保留约 95 天。`report-run` 超过 31 天会在本地直接报错并提示怎么拆；`ads performance` / `ads wasted-spend` / `ads review` 不受此限——它们会自动把长区间切成 ≤31 天的段分别拉取再合并（每段各自计 `--timeout`），最长可一次查满 95 天。
+
+**重复报表(HTTP 425)**：同配置+同日期的报表短时间内重复创建时,亚马逊会拒绝并附上原报表编号;CLI 会自动复用那张报表继续轮询下载,不再报错(比如刚跑过 `report-run --type search-terms`,紧接着跑 `wasted-spend` 同日期也能成功)。
 
 报表在亚马逊侧排队，可能要几分钟到几十分钟。`--timeout` 单位为分钟，默认 10，只接受 1–60 的有限数字；超时只停止本次轮询，不会取消服务端报告。用 `amz-cli ads report-status --profile-id <ID> --report-id <编号>` 继续查询；完成响应会保留 Amazon 返回的下载信息。当前版本没有按既有 `reportId` 单独下载的 `ads report-download` 命令，重新运行 `ads report-run` 会创建新报告，不是恢复原任务。
 
@@ -550,6 +577,10 @@ amz-cli ads test-account-status
 一组"把多次调用收成一条命令"的运营命令:读命令一步取数聚合,批量写命令**一次预览整批 → 人审一次 → 令牌绑定整批 → 按片执行、失败隔离**(单批最多 100 条,超出自动分批/请拆批)。批量写清单:CLI 用 `--file <清单.json>`,MCP 用内联 `--changes`,Agent 可直接拿读命令输出生成。
 
 ### 读:数据总览
+
+- **`ads review` — 广告体检一条龙(可聚焦单个 ASIN)**
+  `amz-cli ads review --profile-id 123 --start 2026-07-21 --end 2026-08-19 [--asin B0XXXXXXXX] [--min-clicks 5] [--limit 50] [--timeout 20]`
+  一条命令替代串行跑 `campaigns` + `performance` + `wasted-spend`(+ advertised-products 报表):活动清单(含启停状态/日预算)同步拉取,两三张报表**同时创建并行生成**,总耗时≈最慢一张。输出:`campaigns`(全量活动+状态计数)、`totals`(账户级花费/销售/整体 ACOS)、`performance`(按活动,烧钱零销售排最前)、`wastedTerms`(白花钱搜索词,可直接喂 `negative-batch`)。带 `--asin` 时额外拉广告商品报表,`asinFocus` 给出该 ASIN 由哪些活动在投、各活动表现,以及只看这些活动的绩效/废词过滤视图——"分析某个新品广告该怎么调"用这一条命令即可取齐全部数据。
 
 - **`ads performance` — 广告绩效总览(标最差)**
   `amz-cli ads performance --profile-id 123 --start 2026-07-01 --end 2026-07-31 [--by ad-group] [--min-spend 5] [--acos-min 50] [--limit 20]`
