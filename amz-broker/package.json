@@ -5,7 +5,11 @@
   "type": "module",
   "private": true,
   "scripts": {
-    "start": "node server.mjs"
+    "start": "node server.mjs",
+    "test": "node --test tests/"
+  },
+  "dependencies": {
+    "undici": "^6.28.0"
   },
   "engines": {
     "node": ">=20"

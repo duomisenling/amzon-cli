@@ -1,7 +1,48 @@
 export const MAX_REQUEST_BODY_BYTES = 16 * 1024;
 
+/** 缓存命中后仍要提前多久停止发放(毫秒)。 */
+export const SERVE_MARGIN_MS = 120_000;
+
+/**
+ * 按亚马逊那边的真实到期时刻,算这张票还能用多少秒。
+ *
+ * 必须按真实剩余算,不能回填铸票时的 expires_in —— CLI(broker.ts)会按
+ * expires_in - 60 缓存,回填 3600 会让它把一张只剩两分钟的票当新票用近一小时。
+ *
+ * 至少返回 1:0 或负数会让 CLI 的缓存时间算成负值,行为不可预期。
+ */
+export function remainingSeconds(realExpiresAt, now = Date.now()) {
+  return Math.max(1, Math.floor((realExpiresAt - now) / 1000));
+}
+
 export function parseMintApi(value) {
   return value === 'sp-api' || value === 'ads' ? value : null;
+}
+
+// marketplace 国家码 → 区域(与 CLI 的 regions.ts 逐条对齐,官方 marketplace-ids 文档口径)
+export const COUNTRY_TO_REGION = {
+  US: 'na', CA: 'na', MX: 'na', BR: 'na',
+  UK: 'eu', GB: 'eu', DE: 'eu', FR: 'eu', IT: 'eu', ES: 'eu',
+  NL: 'eu', SE: 'eu', PL: 'eu', BE: 'eu', IE: 'eu', TR: 'eu',
+  AE: 'eu', SA: 'eu', EG: 'eu', IN: 'eu', ZA: 'eu',
+  JP: 'fe', AU: 'fe', SG: 'fe',
+};
+
+/**
+ * 从 mint 请求体解析区域:显式 region 优先;否则由 marketplace 国家码映射。
+ * marketplace 给了但映射不到 → 返回错误,绝不静默回落到 na
+ * (回落会把 PL 店的令牌换成北美区端点,CLI 拿去调用只会得到一堆 403,方向全错)。
+ * 两者都没给 → 默认 na(与 CLI 的默认区域一致)。
+ */
+export function parseMintRegion(parsed) {
+  const region = String(parsed.region ?? '').toLowerCase().trim();
+  if (region) return { region };
+  const marketplace = String(parsed.marketplace ?? '').trim();
+  if (marketplace) {
+    const mapped = COUNTRY_TO_REGION[marketplace.toUpperCase()];
+    return mapped ? { region: mapped } : { error: 'unknown_marketplace', detail: marketplace };
+  }
+  return { region: 'na' };
 }
 
 export async function readRequestBody(req, maxBytes = MAX_REQUEST_BODY_BYTES) {
