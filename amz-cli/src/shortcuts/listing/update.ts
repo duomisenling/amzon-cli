@@ -186,8 +186,53 @@ function parsePatches(flags: Record<string, unknown>): JsonPatch[] {
         message: `patch value at item ${index + 1} must be an array of objects`,
       });
     }
+    // 结构对但没填内容一样写不进去,Amazon 只会回 "does not have enough values"
+    // 一类的错误码,调用方得从错误码倒推哪里没填。逐个元素判,不是"全空才拒":
+    // 混着一个空元素同样会被 Amazon 拒。
+    if (Array.isArray(p.value) && !p.value.every(patchValueObjectHasContent)) {
+      throw new AmzError({
+        type: 'invalid_param',
+        subtype: 'empty_patch_value',
+        param: '--patches',
+        hintAgent: 'fix_param',
+        hintHuman:
+          `第 ${index + 1} 个 patch 的 value 里有元素没填实际内容` +
+          '(对象为空、字段全是空串,或只有 marketplace_id / language_tag 而缺少值本身)。' +
+          '请先读取该 SKU 的当前值、或用 listing schema 确认结构后再填写,' +
+          '例如 generic_keyword 需要 { value: "关键词", marketplace_id: "...", language_tag: "..." }。',
+        message: `patch value at item ${index + 1} has an element with no content beyond qualifiers`,
+      });
+    }
   }
   return parsed as JsonPatch[];
+}
+
+// marketplace_id / language_tag 是 Amazon 多值属性上几乎恒定存在的限定符,
+// 用来标明这条值属于哪个站点和语言,本身不是"值"。把它们算作内容会漏掉真实
+// 事故的形状:generic_keyword 的元素只有这两个限定符、缺了 value 键,本地放行,
+// 一路送到 Amazon 才回 99022 does not have enough values。
+const VALUE_QUALIFIER_KEYS = new Set(['marketplace_id', 'language_tag']);
+
+/** 字段是否真的填了东西:空串、纯空白、空数组、空对象都算没填。 */
+function hasContent(value: unknown): boolean {
+  if (value === null || value === undefined) return false;
+  if (typeof value === 'string') return value.trim().length > 0;
+  if (Array.isArray(value)) return value.some(hasContent);
+  if (typeof value === 'object') return Object.values(value).some(hasContent);
+  return true; // 数字、布尔本身就是内容
+}
+
+/**
+ * 单个值对象是否填了实际内容:去掉限定符后仍有非空字段才算。
+ * 各属性的键名不同(generic_keyword 用 value,包装尺寸用 length/unit),
+ * 所以不要求某个固定键名,只要求"限定符之外还写了东西"。
+ * CLI 与 MCP 两条通道共用这一个判定,避免规则漂移。
+ */
+export function patchValueObjectHasContent(item: unknown): boolean {
+  if (typeof item !== 'object' || item === null || Array.isArray(item)) return false;
+  return Object.entries(item as Record<string, unknown>).some(
+    ([key, value]) => !VALUE_QUALIFIER_KEYS.has(key) && hasContent(value),
+  );
 }
 
 /** 从 patch path(/attributes/xxx/...)提取顶层属性名,用于展示当前值对照。 */

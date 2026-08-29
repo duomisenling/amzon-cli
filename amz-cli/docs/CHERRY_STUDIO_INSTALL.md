@@ -54,34 +54,151 @@ Test-Path "$env:USERPROFILE\.agents\skills\amz-cli\SKILL.md"
 
 ### Cherry Studio 持久注册（必须）
 
-如果由 Cherry Studio Agent 协助安装，把下面整段要求交给它。这里的 `skills` 指 Cherry Studio 注入给 Agent 的内置工具，不是 PowerShell 中的 `npx skills` 命令：
+> ⚠️ 只发「请全局安装 amz-cli」这类安装指令，Cherry 一定装不上。`npx amz-cli@latest install` 的终点是通用目录 `~/.agents/skills/`（装了 Claude Code 的机器还会多一个软链），Cherry **从不读这个目录**：它认 `%APPDATA%\CherryStudio\Data\Skills\<名称>\` 里的文件加上 `Data\agents.db` 中 `skills` / `agent_skills` 两张表的登记，而这只有 Cherry 注入给 Agent 的内置 `skills` 工具能写。漏掉这一步时，Agent 看到通用目录有东西就会回报「Skill 安装成功 ✅」——**报告属实，Cherry 里却是空的**，这是最容易被放过的失败。
+
+> ⚠️ **手动把文件复制进 `Data\Skills\` 无效。** Cherry 启动时不扫描这个目录：实测把一个探针 skill 放进去，三天后 Cherry 重启多次，`agents.db` 里依然 0 条记录。没有数据库登记就等于没安装，Agent 不要用「文件已复制」当作完成。
+
+### 先分辨 Cherry 版本（两条路线的分岔点）
+
+不同版本的 Cherry 注入给 Agent 的内置 `skills` 工具**动作完全不同**，用错路线会卡死。先问一句：
 
 ```text
-请完成 amz-cli 的 Cherry Studio 持久注册：
-
-1. 先确认 amz-cli --version 成功，并确认
-   ~/.agents/skills/amz-cli/SKILL.md 存在。
-2. 调用 Cherry Studio 内置 skills 工具的 init 操作，name=amz-cli，
-   取得 Cherry 全局技能目录。不要用 npx skills 代替。
-3. 将 ~/.agents/skills/amz-cli/ 中的全部文件复制到 init 返回的目录，
-   不修改文件内容。
-4. 如果目标目录存在来源不明的同名文件，立即停止并告诉我，不要覆盖，
-   也不要直接修改 Cherry Studio 数据库。
-5. 确认目标目录包含 SKILL.md 后，调用 Cherry 内置 skills 工具的
-   register 操作，name=amz-cli。
-6. 调用 Cherry 内置 skills list，确认 amz-cli 已登记并为当前 Agent
-   启用；最后只报告安装路径和启用状态，不输出任何 .env 内容。
+请只报告一件事：你的 Cherry 内置 skills 工具有哪些动作可用？不要执行任何操作。
 ```
 
-Cherry 内置 `register` 会把目录登记到 Cherry 的技能库，并为当前 Agent 启用。只运行外部 `npx skills add`、只看到 `~/.agents/skills/amz-cli`，或者只把 Git 仓库加入工作目录，都不等于完成了 Cherry 注册。
+- 回答里只有 `search_skills` / `install_skill` → **路线 A（新版）**。本地目录注册通道已被移除，只能从 marketplace 或 GitHub URL 安装。
+- 回答里有 `init` / `register` / `list` → **路线 B（旧版）**。可以从本地全局包目录注册。
 
-注册后检查：
+### 路线 A：新版 Cherry（从 GitHub 安装）
+
+把下面**整段**交给 Agent：
+
+```text
+请全局安装最新版 amz-cli，并完成 Cherry Studio 注册。
+
+【第一步】检查 Node.js：
+node --version
+必须为 v20 或更高。不符合时停止，不要自行安装系统软件。
+
+【第二步】安装命令行（Skill 不走这一步，后面单独装）：
+npx.cmd --yes amz-cli@latest install
+
+【第三步】验证命令（Bash）：
+amz-cli --version
+npm view amz-cli version
+command -v amz-cli
+command -v amz-cli-mcp
+amz-cli --version 必须与 npm view amz-cli version 一致，且两个命令都能找到。
+任一不满足就停止并报告，不要继续第四步。
+
+【第四步】清理可能存在的手工残留
+如果 %APPDATA%\CherryStudio\Data\Skills\ 下已经有别人手动复制进去的
+amz-cli 或 amazon-title-compliance 文件夹，先删掉它们——它们没有数据库
+登记、不会生效，留着会和下一步装进来的重名冲突。目录本来就不存在时跳过。
+
+【第五步】用内置 skills 工具安装（关键）
+调用 mcp__skills__install_skill 两次，install_source 分别是：
+https://github.com/duomisenling/amzon-cli/blob/main/amz-cli/skills/amz-cli-cherry/SKILL.md
+https://github.com/duomisenling/amzon-cli/blob/main/amz-cli/skills/amazon-title-compliance-cherry/SKILL.md
+
+不要用 npx skills add 代替，不要手动复制文件，不要修改 agents.db。
+任一次失败就如实报告失败原因，不要说"已完成"。
+
+【禁止】读取、展示、输出、修改或覆盖 Windows 用户目录下 .amz-cli 中的
+任何 .env 文件；不要调用任何 Amazon API。
+
+【完成后报告这 5 项，不要合并、不要用"已安装"一句带过】
+1. Node.js 版本；
+2. amz-cli 版本，以及 npm view amz-cli version 的值（两者必须一致）；
+3. amz-cli / amz-cli-mcp 是否都能找到；
+4. 第四步是否删除了残留目录（删了哪些／本来就没有）；
+5. 两次 install_skill 各自的返回结果，成功还是失败、失败原因是什么。
+
+【最后提醒用户两件事，都要说】
+1. 新建一个会话，Skill 清单才会重新加载；
+2. 如果还要用写操作 MCP，请完全退出 Cherry Studio（含托盘）再重新打开——
+   新建会话刷新不了 PATH，装完不重启会让 MCP 报 -32000 Connection closed。
+```
+
+**这两个 URL 指向的是「加载器薄壳」，不是完整说明。** 薄壳只有一屏，内容是「运行 `npm root -g`，读取 `<输出>/amz-cli/skills/<skill 名>/SKILL.md` 全文后按其执行」；完整规则随 npm 包分发。这样设计是为了让 **Skill 内容跟着 `npx amz-cli@latest install` 走**——升级 CLI 即同步升级 Skill，不需要每台机器进 Cherry 卸载重装。
+
+因此薄壳文件应保持稳定，只有 frontmatter 的 `description`（Cherry 用它决定何时触发技能）变化时才需要重新安装。仓库必须是公开的，Cherry 才能 clone。
+
+维护时注意：薄壳（`skills/*-cherry/`）**不进 npm 包**（`package.json` 的 `files` 是白名单，没有列它们），只走 GitHub；完整 skill（`skills/amz-cli/`、`skills/amazon-title-compliance/`）只进 npm 包。改了薄壳要推 `main`，改了完整 skill 要发 npm。
+
+### 路线 B：旧版 Cherry（从本地全局包注册）
+
+把下面**整段**交给它，不要只截取安装部分。这里的 `skills` 指 Cherry Studio 注入给 Agent 的内置工具，不是 PowerShell 中的 `npx skills` 命令：
+
+```text
+请全局安装最新版 amz-cli，并完成 Cherry Studio 注册。
+
+【第一步】检查 Node.js：
+node --version
+必须为 v20 或更高。不符合时停止，不要自行安装系统软件。
+
+【第二步】安装：
+npx.cmd --yes amz-cli@latest install
+
+【第三步】验证命令（Bash）：
+amz-cli --version
+npm view amz-cli version
+command -v amz-cli
+command -v amz-cli-mcp
+amz-cli --version 必须与 npm view amz-cli version 一致，且两个命令都能找到。
+任一不满足就停止并报告，不要继续第四步。
+
+【第四步】Cherry Studio 注册（关键，不可跳过）
+这里的 skills 指 Cherry Studio 注入给你的【内置工具】，不是 PowerShell 里的
+npx skills 命令。如果你没有这个内置工具，立即停止并如实报告"当前 Agent 没有
+Cherry 内置 skills 工具"，不要用 npx skills 冒充完成。
+
+先取全局包目录，源文件一律从这里拿（就是第二步刚装好的那份）：
+npm root -g
+源目录 = <npm root -g 的输出>\amz-cli\skills\<skill 名>
+
+对 amz-cli 和 amazon-title-compliance 两个 skill 各做一遍：
+1. 调用内置 skills 的 init，name=<skill 名>，记下它返回的目标目录。
+2. 把上面的源目录下全部文件复制到 init 返回的目录，不修改内容。
+3. 若目标目录已有来源不明的同名文件，停止并报告，不要覆盖，
+   也不要直接修改 Cherry Studio 数据库(agents.db)。
+4. 确认目标目录里有 SKILL.md 后，调用内置 skills 的 register，name=<skill 名>。
+
+【第五步】验证 Cherry 注册（Bash）：
+ls "$APPDATA/CherryStudio/Data/Skills/amz-cli/SKILL.md"
+ls "$APPDATA/CherryStudio/Data/Skills/amazon-title-compliance/SKILL.md"
+再调用内置 skills 的 list，确认两个 skill 已登记且对当前 Agent 启用。
+文件存在但 list 里没有 = 没注册成功，必须如实报告，不要说已完成。
+
+【禁止】读取、展示、输出、修改或覆盖 Windows 用户目录下 .amz-cli 中的
+任何 .env 文件；不要调用任何 Amazon API。
+
+【完成后报告这 5 项，不要合并、不要用"已安装"一句带过】
+1. Node.js 版本；
+2. amz-cli 版本，以及 npm view amz-cli version 的值（两者必须一致）；
+3. amz-cli / amz-cli-mcp 是否都能找到；
+4. npm root -g 的输出，以及该目录下 amz-cli\skills\ 里有哪几个 skill；
+5. Cherry 注册结果：内置 skills init 返回的实际目录、上面两个 SKILL.md
+   是否存在、内置 skills list 里两个 skill 的登记与启用状态。
+
+【最后提醒用户两件事，都要说】
+1. 新建一个会话，Skill 清单才会重新加载；
+2. 如果还要用写操作 MCP，请完全退出 Cherry Studio（含托盘）再重新打开——
+   新建会话刷新不了 PATH，装完不重启会让 MCP 报 -32000 Connection closed。
+```
+
+路线 B 的内置 `register` 会把目录登记到 Cherry 的技能库，并为当前 Agent 启用。只运行外部 `npx skills add`、只看到 `~/.agents/skills/amz-cli`、只把文件复制进 `Data\Skills\`，或者只把 Git 仓库加入工作目录，都不等于完成了 Cherry 注册。
+
+**验证必须分两层，缺一层就是没装上**（路线 A 下 `Data\Skills\` 里的目录名由 Cherry 自己决定，可能不叫 `amz-cli`，以 Cherry 的「设置 → Skills」列表为准）：
 
 ```powershell
+# 第一层：通用目录（install 的终点，Cherry 不读这里）
+Test-Path "$env:USERPROFILE\.agents\skills\amz-cli\SKILL.md"
+# 第二层：Cherry 自己的技能目录（register 的结果）
 Test-Path "$env:APPDATA\CherryStudio\Data\Skills\amz-cli\SKILL.md"
 ```
 
-结果应为 `True`，并且 Cherry Studio 的“设置 → Skills”中应出现 `amz-cli`。如果内置 `skills list` 显示已登记，但这个固定路径不存在，以内置工具返回的实际路径为准，不要手动修改 Cherry 数据库。
+两个都为 `True`，并且 Cherry Studio 的“设置 → Skills”中出现 `amz-cli`，才算完成。只有第一个为 `True`，说明 Agent 只跑完了安装、跳过了注册 —— 这正是最常见的“报告成功但用不了”。如果内置 `skills list` 显示已登记，但第二个固定路径不存在，以内置工具返回的实际路径为准，不要手动修改 Cherry 数据库。
 
 ## 三、配置凭证
 
@@ -303,6 +420,14 @@ MCP 工具采用成对设计：
 ### 挂载排查
 
 - **新会话里看不到 `prepare_*` / `apply_*` 工具**：多半是加了 MCP 但没在 Agent 里勾选，或勾了没新开会话。回到 Agent 编辑页确认已勾选 `Amazon Safe Writes`，保存后重开会话。
+- **导入后启动失败，弹 `MCP error -32000: Connection closed`**：这条消息不是真正原因，真正原因被吞在子进程的 stderr 里。**先去看 Cherry 自己的 MCP 日志**（服务条目里的日志入口，或 `%APPDATA%\CherryStudio\logs\`），`[STDERR]` 那几行才是答案。常见真因：
+
+  1. **刚装完 amz-cli 没重启 Cherry** —— 必须完全退出 Cherry Studio（含托盘）再打开，否则 Cherry 用的还是安装前的 PATH，找不到 `amz-cli-mcp`。
+  2. **日志里出现 `'cmd.exe' 不是内部或外部命令`** —— 这台机器的 PATH 里缺了 `C:\Windows\System32`，连 `cmd.exe` 这个名字都解析不出来，进程秒退。把配置里的 `"command": "cmd.exe"` 改成绝对路径 `"command": "C:\\Windows\\System32\\cmd.exe"` 即可立刻恢复。但这属于系统级损坏（该机器上 `where` / `ping` / `ipconfig` 等也会一起失效），应当在系统环境变量的 `Path` 中补回 `%SystemRoot%\system32`、`%SystemRoot%`、`%SystemRoot%\System32\Wbem` 后注销重登。判定方法：`Test-Path "$env:SystemRoot\System32\cmd.exe"` 为 `True` 而 `(Get-Command cmd.exe -ErrorAction SilentlyContinue).Source` 为空。
+  3. **缺账号凭证文件** —— `%USERPROFILE%\.amz-cli\accounts\<代号>.env` 不存在，或文件名与 JSON 里 `--accounts` 的代号对不上（尤其是列表中的**第一个**店铺，Cherry 一连上就会拉起它取工具清单）。注意 Windows 默认隐藏扩展名，记事本另存容易变成 `<代号>.env.txt`。
+  4. `node --version` 低于 v20，或两台机器 amz-cli 版本不一致。
+
+  排到第 4 条还没解决时，换成不经 shell 的绝对路径形式：`command` 填 `(Get-Command node).Source` 的输出，`args` 填 `["<npm root -g 的输出>\\amz-cli\\dist\\mcp-server.js", "--accounts", "<店铺列表>"]`。这样绕开 `cmd.exe` 与 PATH 两层，只要 node 在就能启动。
 - **Cherry 里这个 MCP 一直是红/连接失败**：重新运行 `amz-cli config mcp ...` 生成当前安装对应的新 JSON；方式 B 则先用 `Test-Path $srv` 确认脚本存在，为 False 说明这台机器还没正确安装 amz-cli。
 - **工具能用但审批卡里的店铺不对**：拒绝审批，并在对话中明确正确店铺后重新 prepare。合并 MCP 只接受配置允许列表里的 `account`，而且旧店铺的预览令牌不能跨店复用；若正确账号仍不可选，让管理员重新生成并导入 MCP 配置。
 - **工具能出现，但 `prepare_*` 一调就报凭证类错误**：这台机器缺 `.env`。MCP 默认读 `%USERPROFILE%\.amz-cli\.env`（同事机通常是 Broker 模式那份），按第三章配好凭证再试。
@@ -378,14 +503,70 @@ amz-cli ads keyword-campaign-launch --plan .\my-keyword-campaign.json --dry-run
 
 ## 七、更新与卸载
 
-更新 CLI 和同版本 Skill：
+### 路线 A（新版 Cherry，装的是加载器薄壳）：只有一条命令
+
+Cherry 里注册的是薄壳，正文每次都从本机 npm 包现读。所以升级 **不需要动 Cherry**，不用卸载、不用重装 Skill：
 
 ```powershell
-npx amz-cli@latest install
+npx.cmd --yes amz-cli@latest install
 amz-cli --version
+npm view amz-cli version   # 两个版本号必须一致
 ```
 
-安装器会保留 `%USERPROFILE%\.amz-cli\.env`，不会覆盖凭证。更新命令会刷新 `~/.agents/skills/amz-cli`，但不会自动改写 Cherry 内部登记；随后应让 Cherry Agent 用内置 `skills list` 找到现有 `amz-cli` 路径，把通用目录中的同版本文件同步过去，再调用 `register name=amz-cli`。如果现有目录不是 Cherry 管理的 `amz-cli`，或含有来源不明的同名文件，应停止并让用户核对，不得盲目覆盖。完成后新开 Cherry 会话，避免旧会话继续使用更新前的 Skill 上下文。
+跑完新建一个会话即可。安装器会保留 `%USERPROFILE%\.amz-cli\.env`，不会覆盖凭证。
+
+不会用 PowerShell 的同事，把这段交给他的 Agent（它有终端权限，自己不用打命令）：
+
+```text
+请更新 amz-cli：运行 npx.cmd --yes amz-cli@latest install，
+装完报告 amz-cli --version 和 npm view amz-cli version（两者必须一致）。
+不要动 Cherry 里的 skill 注册，也不要重装 skill——装的是加载器薄壳，
+正文会随这条命令自动更新。
+完成后提醒我新建一个会话。
+```
+
+只有薄壳自身变化（frontmatter 的 `description` 调整过）时，才需要按第二章路线 A 重新 `install_skill` 一次。
+
+### 路线 B（旧版 Cherry，装的是内容快照）：装完还要重新注册
+
+> ⚠️ **升级不要整段丢给 Cherry Agent 去跑。** 部分 Agent 的 harness 禁止全局 npm 安装（`npm install -g` 直接被拦），它们会退回 Cherry 内置的 `cli_install`，而那条通道要用户在界面上点确认，经常返回 `status: "not_installed"`，后面同步 Skill、验证版本的步骤跟着全部作废。稳妥的分工是：**装的部分由本人在 PowerShell 里跑，Agent 只做它有权限做的 Cherry 注册。**
+
+第一步，本人在 PowerShell 里更新 CLI 和同版本 Skill（不经过 Agent）：
+
+```powershell
+npx.cmd --yes amz-cli@latest install
+amz-cli --version
+npm view amz-cli version   # 两个版本号必须一致
+```
+
+安装器会保留 `%USERPROFILE%\.amz-cli\.env`，不会覆盖凭证。
+
+第二步，把下面这段交给 Cherry Agent，让它只做注册（升级后 Cherry 里仍是旧文件，必须重新复制并 `register`，否则界面显示已安装、内容却是旧版）：
+
+```text
+请只完成 Cherry Studio 的 skill 更新注册，不要安装或更新 amz-cli——
+命令行部分我已经在 PowerShell 里跑完了。
+
+禁止事项：不要运行 npm install -g，不要使用 cli_install / cli_list，
+不要运行外部 npx skills，不要读取 .env，不要调用 Amazon API。
+只使用 Cherry Studio 注入给你的内置 skills 工具。
+
+1. 运行 npm root -g，得到全局包目录；
+   源目录 = <输出>\amz-cli\skills\<skill 名>
+2. 对 amz-cli 和 amazon-title-compliance 各做一遍：
+   a. 内置 skills init，name=<skill 名>，记下返回的目标目录；
+   b. 把源目录下全部文件复制过去，覆盖同名旧文件，不修改内容；
+   c. 若目标目录里有来源不明、不属于该 skill 的文件，停止并报告，
+      不要覆盖，也不要直接修改 agents.db；
+   d. 确认目标目录有 SKILL.md 后，内置 skills register，name=<skill 名>。
+3. 内置 skills list，确认两个 skill 已登记且对当前 Agent 启用。
+4. 报告：npm root -g 的输出、init 返回的实际目录、两个 skill 的登记与
+   启用状态。任一步没做成就如实说没做成，不要说"已完成"。
+5. 提醒我新建会话；若还要用写操作 MCP，提醒我完全退出 Cherry Studio
+   （含托盘）再重开。
+```
+
+如果现有目录不是 Cherry 管理的 `amz-cli`，或含有来源不明的同名文件，应停止并让用户核对，不得盲目覆盖。完成后新开 Cherry 会话，避免旧会话继续使用更新前的 Skill 上下文。
 
 卸载前先在 Cherry Studio 的 Skills 管理页面卸载 `amz-cli`，让 Cherry 清理登记和 Agent 链接；然后卸载程序和通用 Skill：
 

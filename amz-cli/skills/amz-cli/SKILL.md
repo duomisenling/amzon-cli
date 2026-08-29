@@ -214,6 +214,17 @@ MCP 正式写工具还受管理员配置的 `AMZ_MCP_ALLOWED_WRITES` 白名单�
    - **CLI 通道**：`listing schema --product-type <类型> --grep <业务名称>` 搜索，再用 `--attribute <真实属性名>` 看结构、字数限制和条数限制。
    **不要凭记忆或其他产品类型的经验拼 patch**。查不到或匹配多个时，列出证据并询问用户；不得换几个猜测字段名反复调用预览。
 3. 照 schema 拼 patch JSON 写入临时文件，用 `--patches @文件路径` 传入。若预览报 8560，不要自动添加字段：先读本次 issues，并确认当前 schema 是否包含 `merchant_suggested_asin`、ASIN 是否已核对；只有两者都满足时才按 schema 结构补充并重新预览。
+
+   **多值属性的值一律用「当前值去掉 `value` 键」当模板，不要手拼结构。** 先用 `listing sku --include attributes` 读该 SKU 的现值，现值对象天然带着这个卖家、站点、产品类型正确的 `marketplace_id` 和 `language_tag`，比照 schema 手拼可靠。该属性还没有值时，才按 schema 返回的结构填。
+
+   `value` 是**对象数组**，实际内容写在对象里，不是字符串数组：
+
+   ```json
+   [{ "op": "replace", "path": "/attributes/generic_keyword",
+      "value": [{ "value": "cool box camping cooler", "marketplace_id": "A1F83G8C2ARO7P", "language_tag": "en_GB" }] }]
+   ```
+
+   各属性的键名不同（`generic_keyword` 用 `value`，包装尺寸用 `length`/`unit`），以 schema 为准。只写了 `marketplace_id` / `language_tag` 而漏掉值本身、或值是空串时，本地会以 `empty_patch_value` 拒绝并说明缺什么。**但本地只能判断「有没有填」，不判断「填得对不对」** —— 键名错、值超长、枚举值非法这些仍要靠 `VALIDATION_PREVIEW`，所以照 schema 拼仍是唯一可靠做法。
 4. 预览（按上面「写操作」的通道判断二选一）：
    - **MCP 通道**：调 `prepare_listing_update`。程序会再次强制获取卖家专属 Schema，核对补丁属性存在且未标记为不可编辑，并把 Schema 版本/校验值绑定进令牌；通过后才走官方 `VALIDATION_PREVIEW`。读回 `schemaValidation`、`status`、issues、`previewToken`、`applyAllowed`。
    - **CLI 通道**：`listing update --dry-run`（同样走 `VALIDATION_PREVIEW`）。

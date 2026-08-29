@@ -16,7 +16,7 @@ import { adsStateBatch, MAX_STATE_BATCH } from '../shortcuts/ads/state-batch.js'
 import { adsBudgetBatch, MAX_BUDGET_BATCH } from '../shortcuts/ads/budget-batch.js';
 import { feedSubmit } from '../shortcuts/feed/commands.js';
 import { listingSchema } from '../shortcuts/listing/schema.js';
-import { listingUpdate } from '../shortcuts/listing/update.js';
+import { listingUpdate, patchValueObjectHasContent } from '../shortcuts/listing/update.js';
 import { listingCreate } from '../shortcuts/listing/create.js';
 import {
   applyConfirmedCapture,
@@ -52,10 +52,20 @@ const nonEmpty = z.string().trim().min(1);
 const numericId = z.string().regex(/^\d+$/);
 const region = z.enum(['na', 'eu', 'fe']).optional();
 const date = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
+// 与 CLI 通道共用同一个判定(listing/update.ts 导出),避免两条通道的规则漂移。
+// 拦的是"标了站点和语言却没写值"这类形状 —— 放行只会换来 Amazon 的 99022
+// 一类报错,调用方还得从错误码倒推哪里没填。
+const patchValueObject = z.record(z.unknown()).refine(patchValueObjectHasContent, {
+  message:
+    '值对象里没有实际内容(对象为空、字段全是空串,或只有 marketplace_id / language_tag 而缺少值本身);' +
+    '请先用 inspect_listing_schema 或读取该 SKU 当前值确认结构' +
+    '(例如 generic_keyword 需要 { value: "关键词", marketplace_id: "...", language_tag: "..." })',
+});
+
 const patchSchema = z.object({
   op: z.enum(['add', 'replace', 'merge', 'delete']),
   path: nonEmpty,
-  value: z.array(z.record(z.unknown())).optional(),
+  value: z.array(patchValueObject).optional(),
 }).strict();
 
 function strings(args: Record<string, unknown>, numericKeys: string[] = []): Record<string, unknown> {

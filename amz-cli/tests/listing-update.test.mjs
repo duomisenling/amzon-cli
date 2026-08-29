@@ -135,6 +135,43 @@ test('rejects unsupported operations, nested paths, and non-array values locally
   );
 });
 
+test('rejects patch values whose objects contain no actual content', () => {
+  const qualifiers = { marketplace_id: 'A1F83G8C2ARO7P', language_tag: 'en_GB' };
+  for (const value of [
+    [{}],
+    [{ value: '   ' }],
+    [{ value: [] }],
+    // 真实事故的两种形状:限定符齐全,唯独没写值本身。把 marketplace_id /
+    // language_tag 算作"内容"就会漏掉它们,一路送到 Amazon 才回
+    // 99022 "does not have enough values"。
+    [qualifiers],
+    [{ value: '', ...qualifiers }],
+    // 混着一个空元素同样会被 Amazon 拒,不能因为别的元素填了就放行。
+    [{ value: 'cool box', ...qualifiers }, {}],
+  ]) {
+    assert.throws(
+      () => listingUpdate.validate(flags([{ op: 'replace', path: '/attributes/generic_keyword', value }])),
+      (error) => error?.subtype === 'empty_patch_value',
+      `should reject ${JSON.stringify(value)}`,
+    );
+  }
+});
+
+test('accepts multi-value attribute patches that carry real content', () => {
+  const qualifiers = { marketplace_id: 'A1F83G8C2ARO7P', language_tag: 'en_GB' };
+  for (const [path, value] of [
+    ['/attributes/generic_keyword', [{ value: 'cool box camping cooler', ...qualifiers }]],
+    // 键名因属性而异:包装尺寸用 length/unit,不带 value 键也必须放行。
+    ['/attributes/item_package_dimensions', [{ length: 10, unit: 'centimeters' }]],
+    ['/attributes/fulfillment_availability', [{ quantity: 0 }]],
+  ]) {
+    assert.doesNotThrow(
+      () => listingUpdate.validate(flags([{ op: 'replace', path, value }])),
+      `should accept ${JSON.stringify(value)}`,
+    );
+  }
+});
+
 test('add, replace, and merge require value before any Amazon preview call', () => {
   for (const [op, path] of [
     ['add', '/attributes/item_name'],
@@ -155,7 +192,7 @@ test('merge only accepts the two paths documented by Amazon', () => {
     '/attributes/purchasable_offer',
   ]) {
     assert.doesNotThrow(() =>
-      listingUpdate.validate(flags([{ op: 'merge', path, value: [{}] }])),
+      listingUpdate.validate(flags([{ op: 'merge', path, value: [{ quantity: 1 }] }])),
     );
   }
   assert.throws(
