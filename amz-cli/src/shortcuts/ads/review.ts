@@ -41,6 +41,12 @@ export function trimCampaign(c: Record<string, unknown>): Record<string, unknown
   };
 }
 
+/** 可选的广告商品报表结果:成功给 rows,失败给 error(不抛,避免拖垮主体数据)。 */
+interface ProductReportResult {
+  rows?: Array<Record<string, unknown>>;
+  error?: string;
+}
+
 export interface AsinCampaignAgg {
   campaignId?: string;
   impressions: number;
@@ -153,7 +159,15 @@ export const adsReview: ToolDefinition = {
     { name: 'end', desc: '结束日期 YYYY-MM-DD(必填)', required: true },
     { name: 'asin', desc: '聚焦某个 ASIN:额外拉广告商品报表,标出该 ASIN 由哪些活动在投并过滤绩效/废词(可选)' },
     { name: 'min-clicks', desc: '废词判定:至少多少点击才算值得砍,默认 10(1-100000)' },
-    { name: 'limit', desc: '废词最多返回多少个(可选,默认全部,按花费降序)' },
+    { name: 'limit', desc: '废词最多返回多少个(可选,不给则跟随 --top;按花费降序)' },
+    {
+      name: 'top',
+      desc:
+        '绩效行与活动明细各最多返回多少条,默认 100' +
+        '(绩效按最差排前;活动明细按 ENABLED > PAUSED > ARCHIVED 排序后取前 N)。' +
+        'totals 与 total/enabled/paused/archived 计数始终按全量算,不受影响;' +
+        '要拿全量明细用 ads performance --limit / ads campaigns --max',
+    },
     { name: 'timeout', desc: '每张报表最长等待分钟数,默认 10(1-60)' },
   ],
   validate: (flags) => {
@@ -162,6 +176,7 @@ export const adsReview: ToolDefinition = {
     requireOptionalAsin(flags);
     validateNumberFlag(flags, 'minClicks', '--min-clicks', { min: 1, max: 100_000, integer: true });
     validateNumberFlag(flags, 'limit', '--limit', { min: 1, max: 100_000, integer: true });
+    validateNumberFlag(flags, 'top', '--top', { min: 1, max: 100_000, integer: true });
     validateNumberFlag(flags, 'timeout', '--timeout', { min: 1, max: 60 });
   },
   execute: async (ctx) => {
@@ -173,13 +188,17 @@ export const adsReview: ToolDefinition = {
     const limitRaw = strFlag(ctx.flags, 'limit');
     const limit = limitRaw !== undefined ? Number(limitRaw) : undefined;
     const timeout = Number(strFlag(ctx.flags, 'timeout') ?? 10);
+    // 大账户(几千活动)全量返回 performance + campaigns.items 能到几 MB,
+    // 直接撑爆 Agent 上下文。默认只给最差的 100 行——这条命令的用途是"喂给
+    // Agent 判断怎么调",不是导出全量数据(那用 ads performance/campaigns)。
+    const top = Number(strFlag(ctx.flags, 'top') ?? 100);
     const window = { start, end };
 
     ctx.progress(
       `· 广告体检:并行拉取活动清单 + ${asin ? '3' : '2'} 张报表(${start} ~ ${end})...`,
     );
     // 活动清单与所有报表同时发起:报表在亚马逊侧排队生成,清单顺带就拉完了
-    const [campaignsRaw, perfRows, searchRows, productRows] = await Promise.all([
+    const [campaignsRaw, perfRows, searchRows, productResult] = await Promise.all([
       listAllCampaigns(ctx, profileId),
       fetchAdsReportRows(
         ctx,
@@ -205,6 +224,9 @@ export const adsReview: ToolDefinition = {
         },
         timeout,
       ),
+      // --asin 的第三张报表是**可选增强**:它失败(报表类型不支持/超时/过期)不该把
+      // 已经拿到手的活动清单、绩效、废词一起丢掉——那才是这条命令的主体价值。
+      // 这里单独兜住异常,把失败信息放进 asinFocus,主体数据照常返回。
       asin
         ? fetchAdsReportRows(
             ctx,
@@ -217,27 +239,60 @@ export const adsReview: ToolDefinition = {
               desc: '广告商品报表',
             },
             timeout,
+          ).then(
+            (rows): ProductReportResult => ({ rows }),
+            (err: unknown): ProductReportResult => ({
+              error: err instanceof Error ? err.message : String(err),
+            }),
           )
-        : Promise.resolve([] as Array<Record<string, unknown>>),
+        : Promise.resolve<ProductReportResult>({ rows: [] }),
     ]);
 
-    const items = campaignsRaw.map(trimCampaign);
     const stateOf = (c: Record<string, unknown>): string => String(c['state'] ?? '').toUpperCase();
+    // 截断前先按状态排序:ENABLED > PAUSED > ARCHIVED > 其他,同级保持接口原序。
+    // 否则 --top 砍掉的可能正好是在投的活动,而留下一堆归档的——那份清单没有意义,
+    // 也与 --top 的说明("排序后取前 N")不符。
+    const STATE_RANK: Record<string, number> = { ENABLED: 0, PAUSED: 1, ARCHIVED: 2 };
+    const rankOf = (c: Record<string, unknown>): number => STATE_RANK[stateOf(c)] ?? 3;
+    const sortedRaw = campaignsRaw
+      .map((c, i) => ({ c, i }))
+      .sort((a, b) => rankOf(a.c) - rankOf(b.c) || a.i - b.i)
+      .map((x) => x.c);
+    const items = sortedRaw.map(trimCampaign);
     const allPerf = buildAdsPerfRows(perfRows, 'campaign');
-    const performance = filterAndSortAdsPerfRows(allPerf, { by: 'campaign', minSpend: 0 });
-    const wastedTerms = aggregateWastedSpend(searchRows, { minClicks, ...(limit !== undefined ? { limit } : {}) });
+    // performanceAll 是排序后的全量:计数、ASIN 聚焦过滤都基于它,
+    // 只有最终输出的 performance 才截断——否则目标 ASIN 的活动若不在最差 100 名内,
+    // asinFocus 会莫名其妙变成空的。
+    const performanceAll = filterAndSortAdsPerfRows(allPerf, { by: 'campaign', minSpend: 0 });
+    const performance = performanceAll.slice(0, top);
+    const shownItems = items.slice(0, top);
+    // 废词同样要有上限:--limit 明确给了就用它,没给就跟随 --top ——
+    // 否则大账户上几千个废词照样把 payload 撑爆,--top 的目的只完成一半。
+    const wastedAll = aggregateWastedSpend(searchRows, { minClicks });
+    const wastedTerms = wastedAll.slice(0, limit ?? top);
 
     let asinFocus: Record<string, unknown> | undefined;
-    if (asin) {
-      const byCampaign = aggregateAsinCampaigns(productRows, asin);
+    if (asin && productResult.error !== undefined) {
+      // 主体数据(campaigns/performance/wastedTerms)已经取到,照常返回;
+      // 只把 ASIN 聚焦这一块标成失败,让调用方知道这部分为什么没有内容。
+      asinFocus = {
+        asin,
+        error: 'ads.advertised_product_report_failed',
+        note: '广告商品报表拉取失败,无法给出该 ASIN 的聚焦视图;campaigns/performance/wastedTerms 不受影响,可照常使用。',
+        detail: productResult.error,
+      };
+    } else if (asin) {
+      const byCampaign = aggregateAsinCampaigns(productResult.rows ?? [], asin);
       const ids = new Set(byCampaign.map((a) => a.campaignId).filter(Boolean));
       asinFocus = {
         asin,
         note: 'byCampaign=该 ASIN 在各活动下的表现;performance/wastedTerms 为只看这些活动的过滤视图',
         campaignCount: ids.size,
         byCampaign,
-        performance: performance.filter((r) => r.campaignId !== undefined && ids.has(r.campaignId)),
-        wastedTerms: wastedTerms.filter(
+        // 用全量 performanceAll 过滤:该 ASIN 的活动可能排在 --top 截断线之外
+        performance: performanceAll.filter((r) => r.campaignId !== undefined && ids.has(r.campaignId)),
+        // 与 performance 同理:用全量废词过滤,否则目标活动的废词可能刚好被截断掉
+        wastedTerms: wastedAll.filter(
           (t: WastedTerm) => t.campaignId !== undefined && ids.has(t.campaignId),
         ),
       };
@@ -247,17 +302,31 @@ export const adsReview: ToolDefinition = {
       profileId,
       window: `${start} ~ ${end}`,
       note:
-        '数据已取齐:campaigns=全量活动(含启停/预算),performance=按活动绩效(spendNoSales=烧钱零销售,最差排前),' +
-        'wastedTerms=白花钱搜索词(可直接喂 ads negative-batch)。调整判断请基于这些数据做。',
+        '数据已取齐:campaigns=活动清单(含启停/预算),performance=按活动绩效(spendNoSales=烧钱零销售,最差排前),' +
+        'wastedTerms=白花钱搜索词(可直接喂 ads negative-batch)。调整判断请基于这些数据做。' +
+        `performance/campaigns.items/wastedTerms 本次各最多给 ${limit ?? top} / ${top} 条(由 --top 与 --limit 控制),` +
+        'totals 与 total/enabled/paused/archived 计数始终按全量算;' +
+        '每组的 xxxCount 是过滤后的总数、xxxShown 是本次实际返回的条数(别拿 Count 去索引数组);' +
+        '带 Truncated 标记时说明还有更多,要全量用 ads performance / ads campaigns。',
       campaigns: {
         total: items.length,
         enabled: campaignsRaw.filter((c) => stateOf(c) === 'ENABLED').length,
         paused: campaignsRaw.filter((c) => stateOf(c) === 'PAUSED').length,
         archived: campaignsRaw.filter((c) => stateOf(c) === 'ARCHIVED').length,
-        items,
+        itemsShown: shownItems.length,
+        ...(items.length > shownItems.length ? { itemsTruncated: true } : {}),
+        items: shownItems,
       },
       totals: buildReviewTotals(allPerf),
+      // Count = 过滤后的总数,Shown = 本次实际返回的条数(与 campaigns 保持同一套命名,
+      // 免得调用方拿 Count 去索引一个已经被截断的数组)
+      performanceCount: performanceAll.length,
+      performanceShown: performance.length,
+      ...(performanceAll.length > performance.length ? { performanceTruncated: true } : {}),
       performance,
+      wastedTermsCount: wastedAll.length,
+      wastedTermsShown: wastedTerms.length,
+      ...(wastedAll.length > wastedTerms.length ? { wastedTermsTruncated: true } : {}),
       wastedTerms,
       ...(asinFocus ? { asinFocus } : {}),
     };

@@ -23,7 +23,7 @@ description: 使用 amz-cli 安全查询和运营 Amazon 卖家店铺。适用�
 | 哪些是**周转慢/压货**（货能卖但可售天数过长，卖得慢） | `inventory slow-moving`（默认可售天数>90天，按可售天数降序） |
 | 最近**哪些品退货多**、主要退货原因 | `returns by-sku`（默认最近 30 天，按 SKU 汇总退货量/笔数/主因） |
 | **哪些搜索词白花钱**（点击多、0 订单，要加否定词） | `ads wasted-spend`（默认点击≥10、0 转化；结果可直接喂 `ads negative-keyword`） |
-| **分析某个产品/整个账户的广告怎么调**（活动状态+绩效+废词一起看） | `ads review`（一条命令并行取齐活动清单/绩效/废词，`--asin` 聚焦单品；**不要**串行跑 campaigns+performance+wasted-spend+report-run） |
+| **分析某个产品/整个账户的广告怎么调**（活动状态+绩效+废词一起看） | `ads review`（一条命令并行取齐活动清单/绩效/废词，`--asin` 聚焦单品；**不要**串行跑 campaigns+performance+wasted-spend+report-run。绩效与活动明细默认各给前 100 条，`--top` 可调；`totals` 和各状态计数始终按全量算） |
 | 订单、单笔订单、商品明细 | `orders list/get/items` |
 | FBA 库存 | `inventory list` |
 | FBA 货件和收货差异 | `shipments list/items` |
@@ -90,13 +90,13 @@ Broker 模式下，`listing mine/sku/schema/update` 的 Seller ID 必须来自 B
 
 - 只从 stdout 解析成功 JSON；stderr 是进度和错误 JSON。
 - `fix_param`：根据 `hint_human` 修改参数后再试。
-- `backoff_and_retry`：只读请求可等待后重试。
+- `backoff_and_retry`：只读请求可等待后重试。**同一条命令最多重试 5 次**（含首次共 5 次），仍失败必须停下来把 `hint_human` 原样报给用户，不得继续重试——CLI 内部已有自己的退避重试（3~4 次），外层再无限重试只会成倍放大等待和限流。
 - `reauthorize`、`report_to_human`：原样向用户说明 `hint_human`，不要编造原因。
 - 写请求的 5xx、网络超时或 `write_result_unknown`：不得自动重试。先让用户用只读状态/列表命令或后台核对是否已生效。
 
 报告的 `--timeout` 单位为分钟，只接受 1–60 的有限数字。超时只停止本次等待，不会取消 Amazon 服务端已经创建的报告；店铺报告可用 `report status/download` 继续，广告报告用 `ads report-status --profile-id <ID> --report-id <ID>` 查询。
 
-广告报表日期限制：单张报表最多 31 天、数据只保留约 95 天（都是亚马逊硬限制）。要查更长区间：`ads performance` / `ads wasted-spend` / `ads review` 会自动分段拉取合并，直接传完整区间即可（最多 95 天）；`ads report-run` 拿的是单张原始报表，超 31 天会报 `fix_param` 错，按提示把日期拆成多段分别拉。同配置+同日期的报表短时间内重复创建时（HTTP 425），CLI 会自动复用原报表，不需要改参数重试。
+广告报表日期限制：单张报表最多 31 天、数据只保留约 95 天（都是亚马逊硬限制）。要查更长区间：`ads performance` / `ads wasted-spend` / `ads review` 会自动分段拉取合并，直接传完整区间即可（最多 95 天）；`ads report-run` 拿的是单张原始报表，超 31 天会报 `fix_param` 错，按提示把日期拆成多段分别拉。同配置+同日期的报表短时间内重复创建时（HTTP 425），CLI 会自动复用原报表，不需要改参数重试。报表状态为 `EXPIRED`（亚马逊侧已过保留期）时会立刻报 `ads.report_expired`，不会干等到超时；**这个错误不要立即重试**——它多半是刚才重复创建时被 425 去重复用到的旧报表，立刻重试会再次命中同一张，必须等几分钟或改动日期范围。
 
 `ads campaigns` / `ads keywords` 的 `--max` 是想要的总条数（默认 100，最大 10000），超过 100 会自动翻页拼接，不必手动循环 `--next-token`。
 

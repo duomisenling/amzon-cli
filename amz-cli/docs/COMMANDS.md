@@ -520,6 +520,8 @@ amz-cli ads report-run --profile-id <ID> --type <预设> --start 2026-07-01 --en
 
 **重复报表(HTTP 425)**：同配置+同日期的报表短时间内重复创建时,亚马逊会拒绝并附上原报表编号;CLI 会自动复用那张报表继续轮询下载,不再报错(比如刚跑过 `report-run --type search-terms`,紧接着跑 `wasted-spend` 同日期也能成功)。
 
+**报表已过期(`ads.report_expired`)**:亚马逊侧的报表有保留期,过期后状态是 `EXPIRED`。CLI 会立刻报错而不是干等到超时。⚠️ **这个错误不要立即重试** —— 它多半就是刚才被 425 去重复用到的那张旧报表,立刻重试会用同样的参数再撞一次去重、再拿回同一张过期报表,陷入死循环;请等几分钟或改动日期范围。
+
 报表在亚马逊侧排队，可能要几分钟到几十分钟。`--timeout` 单位为分钟，默认 10，只接受 1–60 的有限数字；超时只停止本次轮询，不会取消服务端报告。用 `amz-cli ads report-status --profile-id <ID> --report-id <编号>` 继续查询；完成响应会保留 Amazon 返回的下载信息。当前版本没有按既有 `reportId` 单独下载的 `ads report-download` 命令，重新运行 `ads report-run` 会创建新报告，不是恢复原任务。
 
 ### 写 🔒:建广告 / 启停 / 调预算 / 调竞价 / 否定词
@@ -579,8 +581,14 @@ amz-cli ads test-account-status
 ### 读:数据总览
 
 - **`ads review` — 广告体检一条龙(可聚焦单个 ASIN)**
-  `amz-cli ads review --profile-id 123 --start 2026-07-21 --end 2026-08-19 [--asin B0XXXXXXXX] [--min-clicks 5] [--limit 50] [--timeout 20]`
+  `amz-cli ads review --profile-id 123 --start 2026-07-21 --end 2026-08-19 [--asin B0XXXXXXXX] [--min-clicks 5] [--limit 50] [--top 100] [--timeout 20]`
   一条命令替代串行跑 `campaigns` + `performance` + `wasted-spend`(+ advertised-products 报表):活动清单(含启停状态/日预算)同步拉取,两三张报表**同时创建并行生成**,总耗时≈最慢一张。输出:`campaigns`(全量活动+状态计数)、`totals`(账户级花费/销售/整体 ACOS)、`performance`(按活动,烧钱零销售排最前)、`wastedTerms`(白花钱搜索词,可直接喂 `negative-batch`)。带 `--asin` 时额外拉广告商品报表,`asinFocus` 给出该 ASIN 由哪些活动在投、各活动表现,以及只看这些活动的绩效/废词过滤视图——"分析某个新品广告该怎么调"用这一条命令即可取齐全部数据。
+
+  **输出口径**:`performance`、`campaigns.items`、`wastedTerms` 三组明细默认各只给前 100 条(`--top` 控制;废词可用 `--limit` 单独指定,不给则跟随 `--top`)。绩效按最差排前,活动清单按 `ENABLED > PAUSED > ARCHIVED` 排序后再截断。
+  每组都有一对字段:`xxxCount` 是**过滤后的总数**、`xxxShown` 是**本次实际返回的条数**(别拿 Count 去索引已被截断的数组),被截断时另有 `xxxTruncated` 标记。
+  `totals` 和 `total/enabled/paused/archived` 计数**始终按全量算**,不受截断影响;`asinFocus` 也是在全量上过滤,不会因主列表截断而漏掉目标 ASIN 的活动或废词。要拿全量明细用 `ads performance --limit` / `ads campaigns --max` / `ads wasted-spend`。
+
+  **容错**:`--asin` 的广告商品报表是可选增强,它失败(账户不支持该报表类型/超时/过期)不影响主体数据——活动清单、绩效、废词照常返回,只在 `asinFocus.error` 里说明原因。
 
 - **`ads performance` — 广告绩效总览(标最差)**
   `amz-cli ads performance --profile-id 123 --start 2026-07-01 --end 2026-07-31 [--by ad-group] [--min-spend 5] [--acos-min 50] [--limit 20]`

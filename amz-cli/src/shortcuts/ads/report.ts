@@ -193,6 +193,19 @@ export async function fetchAdsReportRows(
   timeoutMin: number,
 ): Promise<Array<Record<string, unknown>>> {
   const segments = splitDateRange(cfg.start, cfg.end);
+  // start > end 时 splitDateRange 返回空数组 —— 就这么走下去会"成功返回 0 行",
+  // 而"没有废词"和"日期传反了"在下游看起来一模一样。入口的 validateReportWindow
+  // 已经拦了这种情况,这里是给绕过校验的调用方(新命令/MCP 路径)兜底,宁可报错。
+  if (segments.length === 0) {
+    throw new AmzError({
+      type: 'invalid_param',
+      subtype: 'ads.empty_date_range',
+      param: '--start',
+      hintAgent: 'fix_param',
+      hintHuman: `日期区间为空(--start ${cfg.start} 晚于 --end ${cfg.end}),请检查日期顺序。`,
+      message: `empty date range: ${cfg.start} ~ ${cfg.end}`,
+    });
+  }
   if (segments.length > 1) {
     ctx.progress(
       `· 日期跨度超过单张报表 ${ADS_REPORT_MAX_DAYS} 天上限,自动分成 ${segments.length} 段拉取合并...`,
@@ -256,13 +269,30 @@ async function waitForAdsReport(
 
     if (state === 'COMPLETED') return status;
 
-    if (state.includes('FAIL') || state.includes('CANCEL') || state.includes('ERROR')) {
+    // EXPIRED 也是终态:报表过期后既不会变 COMPLETED,状态名里也不含 FAIL/CANCEL/ERROR,
+    // 漏掉它就会空转到 timeout(默认 10 分钟)才报"超时",而真因是"这张报表已经没了"。
+    // 撞 425 复用几分钟前的旧报表时最容易碰上,所以必须显式认这个终态。
+    if (
+      state === 'EXPIRED' ||
+      state.includes('FAIL') ||
+      state.includes('CANCEL') ||
+      state.includes('ERROR')
+    ) {
+      const expired = state === 'EXPIRED';
       throw new AmzError({
         type: 'upstream_error',
-        subtype: 'ads.report_failed',
+        subtype: expired ? 'ads.report_expired' : 'ads.report_failed',
+        // EXPIRED 刻意**不**标可重试:它最常见的来源就是上面 425 去重复用到的旧报表,
+        // 而立刻重试会用同样的 body 再撞一次 425、再拿回同一张过期报表 —— Agent 会
+        // 就此陷入死循环。必须等去重窗口过去(几分钟)才可能建出新报表。
         hintAgent: 'report_to_human',
-        hintHuman: `广告报表生成失败(状态 ${state}),原始响应见 message。`,
-        message: `ads report ${reportId} failed: ${JSON.stringify(status).slice(0, 800)}`,
+        hintHuman: expired
+          ? `报表 ${reportId} 已过期(亚马逊侧的报表有保留期)。` +
+            '注意:如果这是刚才重复创建时被"去重"复用到的旧报表,立刻重试只会再次命中同一张,' +
+            '请等几分钟(去重窗口过去)再执行,或改一下日期范围以生成一张全新的报表。'
+          : `广告报表生成失败(状态 ${state}),原始响应见 message。`,
+        message: `ads report ${reportId} ended in state ${state}: ${JSON.stringify(status).slice(0, 800)}`,
+        retryable: false,
       });
     }
 

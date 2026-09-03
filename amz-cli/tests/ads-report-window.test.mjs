@@ -205,3 +205,65 @@ test('fetchAdsReportRows:跨度 32 天自动分 2 段,每段一张报表,行按�
     server.close();
   }
 });
+
+test('fetchAdsReportRows:报表状态 EXPIRED 立即报错,不空转到超时', async () => {
+  // 回归:EXPIRED 既不是 COMPLETED、名字里也没有 FAIL/CANCEL/ERROR,
+  // 旧实现会每 15 秒轮询一次直到 timeout(默认 10 分钟)才报"超时",完全指错方向。
+  // 撞 425 复用几分钟前的旧报表时最容易碰上。
+  let polls = 0;
+  const ctx = {
+    flags: {},
+    progress() {},
+    adsClient: {
+      async request(method, path) {
+        if (method === 'POST') return { reportId: 'r-expired' };
+        polls += 1;
+        return { status: 'EXPIRED' };
+      },
+    },
+  };
+  await assert.rejects(
+    fetchAdsReportRows(
+      ctx,
+      '123',
+      { reportTypeId: 'spSearchTerm', groupBy: ['searchTerm'], columns: ['date'], start: '2026-08-01', end: '2026-08-10' },
+      10,
+    ),
+    // 刻意不标可重试:EXPIRED 多半来自 425 去重复用到的旧报表,立刻重试会再次
+    // 命中同一张 —— 标成 retryable 会让 Agent 陷入死循环。
+    (err) =>
+      err.subtype === 'ads.report_expired' &&
+      err.retryable === false &&
+      err.hintAgent === 'report_to_human' &&
+      err.hintHuman.includes('去重'),
+  );
+  // 只查了一次就判定终态,没有进入 15 秒轮询循环
+  assert.equal(polls, 1);
+});
+
+test('fetchAdsReportRows:日期区间为空(start 晚于 end)直接报错,不静默返回 0 行', async () => {
+  // 回归:splitDateRange 对 start>end 返回 [],旧实现会一路走完返回 rows=[],
+  // 下游分不清"没有废词"和"日期传反了"。
+  let requested = false;
+  const ctx = {
+    flags: {},
+    progress() {},
+    adsClient: {
+      async request() {
+        requested = true;
+        return { reportId: 'x' };
+      },
+    },
+  };
+  await assert.rejects(
+    fetchAdsReportRows(
+      ctx,
+      '123',
+      { reportTypeId: 'spSearchTerm', groupBy: ['searchTerm'], columns: ['date'], start: '2026-08-19', end: '2026-08-01' },
+      10,
+    ),
+    (err) => err.subtype === 'ads.empty_date_range' && err.hintAgent === 'fix_param',
+  );
+  // 一个请求都没发出去
+  assert.equal(requested, false);
+});
