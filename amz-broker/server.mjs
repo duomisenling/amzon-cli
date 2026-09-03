@@ -213,7 +213,7 @@ async function mintToken({ store, api, region }) {
     if (sellerId) extra = { seller_id: sellerId };
   } else {
     refreshToken = process.env[`RT_ADS_${store}`];
-    endpoint = ADS_ENDPOINTS[region] ?? ADS_ENDPOINTS.na;
+    endpoint = Object.hasOwn(ADS_ENDPOINTS, region) ? ADS_ENDPOINTS[region] : ADS_ENDPOINTS.na;
     // 广告调用需要 ClientId 头;client_id 是公开标识符,可下发
     extra = { client_id: clientId };
   }
@@ -338,7 +338,11 @@ const server = createServer(async (req, res) => {
 
       if (!store) return json(res, 400, { error: 'missing_store' });
       if (!api) return json(res, 400, { error: 'invalid_api', detail: String(parsed.api ?? '') });
-      if (!SP_ENDPOINTS[region]) return json(res, 400, { error: 'invalid_region', detail: region });
+      // hasOwn 而非 truthy:SP_ENDPOINTS['constructor'] 这类原型链属性是 truthy,
+      // 直接索引会让 region="constructor" 通过校验,再往下拼出无意义的 endpoint。
+      if (!Object.hasOwn(SP_ENDPOINTS, region)) {
+        return json(res, 400, { error: 'invalid_region', detail: region });
+      }
 
       const authorization = authorize(member, { store, api, region });
       if (!authorization.ok) {

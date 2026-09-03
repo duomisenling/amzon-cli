@@ -34,13 +34,27 @@ export const COUNTRY_TO_REGION = {
  * (回落会把 PL 店的令牌换成北美区端点,CLI 拿去调用只会得到一堆 403,方向全错)。
  * 两者都没给 → 默认 na(与 CLI 的默认区域一致)。
  */
+/** SP-API 的三个区域;protocol 层自己就校验,不把非法值透传给下游拼端点。 */
+export const VALID_REGIONS = ['na', 'eu', 'fe'];
+
 export function parseMintRegion(parsed) {
   const region = String(parsed.region ?? '').toLowerCase().trim();
-  if (region) return { region };
+  // 显式 region 必须在白名单内。用 includes 而不是查对象:普通对象索引会命中
+  // 原型链("constructor"/"toString" 都是 truthy),那正是 server.mjs 里堵掉的洞;
+  // 这里在协议层就拦住,下游不必再指望兜底。
+  if (region) {
+    return VALID_REGIONS.includes(region)
+      ? { region }
+      : { error: 'invalid_region', detail: region };
+  }
   const marketplace = String(parsed.marketplace ?? '').trim();
   if (marketplace) {
-    const mapped = COUNTRY_TO_REGION[marketplace.toUpperCase()];
-    return mapped ? { region: mapped } : { error: 'unknown_marketplace', detail: marketplace };
+    // 必须用 hasOwn:普通对象索引会命中原型链,COUNTRY_TO_REGION['constructor']
+    // 之类返回 truthy,让非法国家码蒙混过关。凭证服务的输入校验不留这种口子。
+    const key = marketplace.toUpperCase();
+    return Object.hasOwn(COUNTRY_TO_REGION, key)
+      ? { region: COUNTRY_TO_REGION[key] }
+      : { error: 'unknown_marketplace', detail: marketplace };
   }
   return { region: 'na' };
 }
